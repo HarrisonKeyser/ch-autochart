@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+# generated song folders and test audio
+*.wav
+*.ogg
+*.mp3
+*.json
+!package.json
