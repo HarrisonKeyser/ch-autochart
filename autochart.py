@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-autochart.py - turn an audio file into a playable Clone Hero song folder.
+autochart.py - turn a song into a playable Clone Hero song folder.
 
     python autochart.py "song.mp3" --artist "Band" --title "Song"
 
@@ -9,23 +9,23 @@ Writes <out>/<Artist - Title>/ containing:
                   section names and star power
     song.ogg      the audio, with a short silent lead-in added so the tempo
                   map can start cleanly on a downbeat
+    guitar.ogg    with --split-audio: the charted part on its own track
     song.ini      metadata (name, artist, length, preview start, difficulty)
     album.png     only when --album-art is given
 
 How it works, in short:
-  1. Beat tracking -> a tempo map (one constant BPM, or a BPM marker wherever
-     the tempo drifts, for songs not recorded to a click).
-  2. Onset detection -> note timings, snapped to a 1/16 grid on that map.
-  3. Pitch movement in a constant-Q spectrogram -> which fret each note gets.
-     Like hand-made charts, it follows the melody's contour (up the neck when
-     the pitch rises, same fret when it repeats) rather than absolute pitch.
-  4. How long each note rings -> sustains. Strong accents -> chords.
-  5. Lower difficulties are thinned-out subsets of Expert, on fewer frets.
-  6. Repetition in the harmony -> section names; star power every few bars.
+  1. The song is split into instruments with Demucs (when installed), and
+     each one is transcribed on its own.
+  2. Bar by bar, the chart follows the guitar wherever it really plays, and
+     hands the part to another instrument (keys, synth, harmonica...) where
+     the guitar sits out, sticking with a choice for whole passages.
+  3. Beat tracking -> a tempo map (constant, or following the band's drift).
+  4. Onsets -> note timings on a 1/16 grid; pitch movement -> frets that
+     follow the melody's contour; heard polyphony -> chords; ring time ->
+     sustains. Lower difficulties are thinned-out subsets of Expert.
+  5. Repetition in the harmony -> section names; star power every few bars.
 
-The result is a solid starting point, not a hand-authored chart: open it in
-Moonscraper to clean it up. For much better results on full-band mixes,
-separate the guitar first (e.g. with Demucs) and pass it with --stem.
+app.py runs the same engine as a local web app with a visual editor.
 """
 
 import argparse
@@ -37,7 +37,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -59,11 +59,18 @@ FINE_LATENCY = 0.004 # the fine envelope peaks ~4 ms after a real attack
 
 # Per-difficulty shaping. gap_* is the closest two notes may be;
 # keep is the share of Expert's notes a difficulty may keep at most.
+# chord/triple: share of notes made into chords when chords are guessed from
+# accents (full mix); max_chord / chord_gap: limits when real chords are heard
+# in an isolated instrument (largest chord, and room needed around it in ticks).
 DIFFICULTIES = {
-    "expert": dict(lanes=5, gap_beats=0.25, gap_sec=0.075, keep=1.00, chord=0.12, triple=0.03),
-    "hard":   dict(lanes=5, gap_beats=0.50, gap_sec=0.150, keep=0.70, chord=0.07, triple=0.00),
-    "medium": dict(lanes=4, gap_beats=0.50, gap_sec=0.240, keep=0.45, chord=0.03, triple=0.00),
-    "easy":   dict(lanes=3, gap_beats=1.00, gap_sec=0.420, keep=0.28, chord=0.00, triple=0.00),
+    "expert": dict(lanes=5, gap_beats=0.25, gap_sec=0.075, keep=1.00, chord=0.12, triple=0.03,
+                   max_chord=3, chord_gap=96),
+    "hard":   dict(lanes=5, gap_beats=0.50, gap_sec=0.150, keep=0.70, chord=0.07, triple=0.00,
+                   max_chord=2, chord_gap=96),
+    "medium": dict(lanes=4, gap_beats=0.50, gap_sec=0.240, keep=0.45, chord=0.03, triple=0.00,
+                   max_chord=2, chord_gap=192),
+    "easy":   dict(lanes=3, gap_beats=1.00, gap_sec=0.420, keep=0.28, chord=0.00, triple=0.00,
+                   max_chord=1, chord_gap=192),
 }
 DIFF_ORDER = ["expert", "hard", "medium", "easy"]
 TRACK_SUFFIX = {"guitar": "Single", "bass": "DoubleBass"}
@@ -73,7 +80,14 @@ TRACK_SUFFIX = {"guitar": "Single", "bass": "DoubleBass"}
 # Small helpers
 # --------------------------------------------------------------------------
 
+# Hooks the web app uses to follow progress (None when run from the command line).
+LOG_HOOK = None        # called with every log line
+PROGRESS_HOOK = None   # called with 0..1 while instruments are being separated
+
+
 def log(msg=""):
+    if LOG_HOOK:
+        LOG_HOOK(msg)
     print(msg, flush=True)
 
 
@@ -96,6 +110,8 @@ class Note:
     strength: float      # 0..1, accent relative to the surrounding music
     pitch: float         # pitch estimate in semitones (CQT bin)
     end_time: float      # when the note stops ringing (original timeline)
+    poly: int = 1        # how many simultaneous pitches started here (chords)
+    src: str = "mix"     # which instrument this note was heard in
     tick: int = 0
     lane: int = 0
     frets: tuple = ()
@@ -177,11 +193,12 @@ class Analysis:
     tempo_guess: float
 
 
-def analyze(y, instrument, bpm_hint):
-    log("  separating harmonic / percussive parts...")
+def analyze(y, instrument, bpm_hint, quiet=False):
+    say = (lambda m: None) if quiet else log
+    say("  separating harmonic / percussive parts...")
     y_h, _ = librosa.effects.hpss(y)
 
-    log("  onset envelope and beat tracking...")
+    say("  onset envelope and beat tracking...")
     env = librosa.onset.onset_strength(y=y, sr=SR, hop_length=HOP)
     env_low = librosa.onset.onset_strength(y=y, sr=SR, hop_length=HOP, fmax=200.0, n_mels=24)
     # Notes = drum-like attacks OR new pitches; the harmonic part's envelope
@@ -197,7 +214,7 @@ def analyze(y, instrument, bpm_hint):
     fine_env = librosa.onset.onset_strength(y=y, sr=SR, hop_length=FINE_HOP, n_fft=512, n_mels=64)
     fine_times = librosa.frames_to_time(np.arange(len(fine_env)), sr=SR, hop_length=FINE_HOP)
 
-    log("  pitch analysis...")
+    say("  pitch analysis...")
     fmin = librosa.note_to_hz("E1" if instrument == "bass" else "E2")
     n_bins = 48 if instrument == "bass" else 60
     C = np.abs(librosa.cqt(y_h, sr=SR, hop_length=HOP, fmin=fmin, n_bins=n_bins, bins_per_octave=12))
@@ -225,8 +242,12 @@ def analyze(y, instrument, bpm_hint):
 
 def refine_times(an, times, before, after):
     """Move each time to the strongest fine-envelope attack in [t-before, t+after].
-    Returns (new_times, found_mask); found is False where no attack stands out."""
+    Returns (new_times, found_mask); found is False where no attack stands out
+    (judged against the typical level and against the attacks around it, so a
+    soft passage after a loud one still counts)."""
     ft, fe = an.fine_times, an.fine_env
+    if getattr(an, "_fine_local", None) is None:
+        an._fine_local = maximum_filter1d(fe, size=int(3.0 / (FINE_HOP / SR)) | 1)
     floor = np.median(fe) + 1e-9
     out = np.array(times, float)
     found = np.zeros(len(out), bool)
@@ -236,7 +257,7 @@ def refine_times(an, times, before, after):
         if b - a < 2:
             continue
         j = a + int(np.argmax(fe[a:b]))
-        if fe[j] > 3 * floor:
+        if fe[j] > 3 * floor and fe[j] > 0.12 * an._fine_local[j]:
             out[i] = ft[j] - FINE_LATENCY
             found[i] = True
     return out, found
@@ -458,8 +479,70 @@ def build_tempo(an, args):
 # Notes
 # --------------------------------------------------------------------------
 
-def detect_notes(an, density, keep_unpitched=False):
+# Harmonic template: a note at CQT bin c also lights up c+12, c+19, c+24, c+28.
+HARMONICS = [(0, 1.0), (12, 0.8), (19, 0.6), (24, 0.5), (28, 0.4)]
+CHORD_RATIO = 0.55   # a second pitch this strong (vs the first) makes a chord
+
+
+def salience(spec):
+    nb = len(spec)
+    sal = np.zeros(nb)
+    for off, w in HARMONICS:
+        sal[:nb - off] += w * spec[off:]
+    return sal
+
+
+def best_pitch(sal, level=None):
+    """Strongest pitch, corrected for octave errors: if a pitch an octave (or
+    octave+fifth, two octaves) lower explains the peak almost as well, the
+    peak is that note's harmonic, which happens when a still-ringing note is
+    re-struck and its upper harmonics jump more than its fundamental."""
+    c = int(np.argmax(sal))
+    if level is None:
+        return c
+    for sub in (24, 19, 12):
+        # ...and that lower note must really be sounding (level = dB spectrum)
+        if c - sub >= 0 and sal[c - sub] >= 0.75 * sal[c] and level[c - sub] >= level[c] - 6.0:
+            return c - sub
+    return c
+
+
+def find_pitches(rise, level=None, max_voices=3):
+    """Iterative multi-pitch estimate: take the strongest pitch, remove its
+    harmonics, and look for another one that is nearly as strong.
+    Returns the pitches (CQT bins), strongest first."""
+    nb = len(rise)
+    r = rise.copy()
+    sal = salience(r)
+    f0s = [best_pitch(sal, level)]
+    top = sal[f0s[0]]
+    if top <= 0:
+        return f0s
+    for _ in range(max_voices - 1):
+        for c in f0s:
+            for off, _ in HARMONICS:
+                r[max(0, c + off - 1):min(nb, c + off + 2)] = 0
+        sal = salience(r)
+        c2 = best_pitch(sal, level)
+        if sal[c2] < CHORD_RATIO * top or any(abs(c2 - c) <= 1 for c in f0s):
+            break
+        f0s.append(c2)
+    return f0s
+
+
+def detect_notes(an, density, keep_unpitched=False, mix=None, gate_db=30.0, src="mix"):
+    """Find the notes in one audio track.
+
+    When `an` is an isolated instrument (a stem) pass the full mix's analysis
+    as `mix`: notes are then only kept where that instrument is actually
+    audible, not where only faint bleed from other instruments remains."""
     env = an.note_env
+    if mix is not None:
+        # An isolated instrument: judge each attack against the playing around
+        # it (3 s), not the loudest moment of the song. Distorted guitar is so
+        # compressed that chord changes barely stand out globally.
+        ref = maximum_filter1d(env, size=int(3.0 / FRAME_SEC))
+        env = env / np.maximum(ref, 0.1 * np.percentile(env, 99) + 1e-9)
     wait = max(1, int(round(0.06 / FRAME_SEC)))
     frames = librosa.onset.onset_detect(
         onset_envelope=env, sr=SR, hop_length=HOP, units="frames",
@@ -472,17 +555,21 @@ def detect_notes(an, density, keep_unpitched=False):
     local_max = maximum_filter1d(env, size=max(3, int(6.0 / FRAME_SEC)))
     strength = env[frames] / np.maximum(local_max[frames], 1e-9)
 
-    times, found = refine_times(an, an.times[frames], before=0.05, after=0.02)
+    times, found = refine_times(an, an.times[frames], before=0.05, after=0.035)
     # No sharp attack nearby = a smeared echo of an earlier note, not a new one.
     frames, times, strength = frames[found], times[found], strength[found]
 
+    audible = None
+    if mix is not None:
+        audible = presence(an, mix, gate_db)
+
     Cdb, Cw = an.Cdb, an.Cw
     nb, nf = Cw.shape
-    # Harmonic template: a note at bin c also lights up c+12, c+19, c+24, c+28.
-    harm = [(0, 1.0), (12, 0.8), (19, 0.6), (24, 0.5), (28, 0.4)]
     max_ring = int(8.0 / FRAME_SEC)
     notes = []
     for i, f in enumerate(frames):
+        if audible is not None and not audible[min(f + 2, len(audible) - 1)]:
+            continue                    # only bleed from other instruments here
         nxt = frames[i + 1] if i + 1 < len(frames) else nf
         a = min(f + 1, nf - 1)
         b = max(a + 1, min(f + 5, nxt, nf))
@@ -493,10 +580,11 @@ def detect_notes(an, density, keep_unpitched=False):
         pitched = rise.max() >= 4.0     # something tonal started here (not just a hi-hat)
         if not pitched:                 # e.g. a re-struck sustained note: use what stands out
             rise = np.clip(Cw[:, a:b].mean(axis=1), 0, None)
-        sal = np.zeros(nb)
-        for off, w in harm:
-            sal[:nb - off] += w * rise[off:]
-        pk = int(np.argmax(sal))
+        sal = salience(rise)
+        # Octave correction needs a clean spectrum: only for isolated instruments.
+        level = after if mix is not None else None
+        f0s = find_pitches(rise, level) if pitched else [best_pitch(sal, level)]
+        pk = f0s[0]
         # Sub-bin refinement for a smoother contour.
         if 0 < pk < nb - 1:
             l, c, r = sal[pk - 1], sal[pk], sal[pk + 1]
@@ -504,6 +592,8 @@ def detect_notes(an, density, keep_unpitched=False):
             pitch = pk + (0.5 * (l - r) / den if den < 0 else 0.0)
         else:
             pitch = float(pk)
+        if len(f0s) > 1 and mix is not None:
+            pitch = float(min(f0s))     # chords follow their lowest note (the root)
 
         # Ring time: follow that pitch until it drops 8 dB below its attack.
         track = Cdb[max(0, pk - 1):pk + 2, f:min(nf, f + max_ring)].max(axis=0)
@@ -511,11 +601,28 @@ def detect_notes(an, density, keep_unpitched=False):
         gone = np.where(track < attack - 8.0)[0]
         gone = gone[gone >= 3]
         end_f = f + (int(gone[0]) if len(gone) else len(track))
-        if not (pitched or keep_unpitched or strength[i] >= 0.7):
+        # Unpitched attacks: drum hits in a mix, but in an isolated instrument
+        # they're re-struck chords and muted strums, so keep the clear ones.
+        if not (pitched or keep_unpitched or strength[i] >= (0.35 if mix is not None else 0.7)):
             continue                    # drums only: not something a guitarist plays
         notes.append(Note(time=float(times[i]), strength=float(strength[i]),
-                          pitch=float(pitch), end_time=float(end_f * FRAME_SEC)))
+                          pitch=float(pitch), end_time=float(end_f * FRAME_SEC),
+                          poly=len(f0s), src=src))
     return notes
+
+
+def presence(part, mix, gate_db):
+    """Per frame: is this isolated instrument really playing? It must be within
+    `gate_db` of its own loud passages and not buried far below the mix
+    (separated stems always carry some quiet bleed from everything else)."""
+    n = min(len(part.rms), len(mix.rms))
+    pr, mr = part.rms[:n], mix.rms[:n]
+    ref = np.percentile(pr, 95) + 1e-9
+    level = 20 * np.log10(pr / ref + 1e-9)
+    share = 20 * np.log10((pr + 1e-9) / (mr + 1e-9))
+    on = (level > -gate_db) & (share > -gate_db * 0.6)
+    # smooth over ~120 ms so a note's own attack/decay doesn't flicker
+    return maximum_filter1d(on.astype(np.uint8), size=int(0.12 / FRAME_SEC) | 1).astype(bool)
 
 
 def quantize(notes, tempo, pad, triplets):
@@ -565,7 +672,7 @@ def thin(notes, cfg, n_expert, tempo, pad):
     return kept
 
 
-def assign_frets(notes, cfg, allow_chords):
+def assign_frets(notes, cfg, allow_chords, real_chords=False):
     """Pick frets that follow the melody's contour, like a human charter:
     higher pitch -> further right, repeated pitch -> same fret, bigger leaps ->
     bigger jumps, while drifting back toward the middle of the local range.
@@ -595,8 +702,8 @@ def assign_frets(notes, cfg, allow_chords):
     def transition(i):
         dp = p[i] - p[i - 1]
         dl = lanes_arr[np.newaxis, :] - lanes_arr[:, np.newaxis]
-        if t[i] - t[i - 1] > 1.5:
-            return np.zeros((L, L))                       # a rest: start fresh
+        if t[i] - t[i - 1] > 1.5 or notes[i].src != notes[i - 1].src:
+            return np.zeros((L, L))                       # a rest or new instrument: start fresh
         if abs(dp) < 0.6:
             return 6.0 * np.abs(dl)                        # same note, same fret
         step = np.clip(round(abs(dp) / 3.0), 1, L - 1)
@@ -614,6 +721,9 @@ def assign_frets(notes, cfg, allow_chords):
         lanes.append(int(back[i, lanes[-1]]))
     lanes = lanes[::-1]
 
+    if real_chords:
+        place_real_chords(notes, lanes, cfg, allow_chords)
+        return
     strengths = np.array([n.strength for n in notes])
     chord_cut = np.quantile(strengths, 1 - cfg["chord"]) if cfg["chord"] > 0 else np.inf
     triple_cut = np.quantile(strengths, 1 - cfg["triple"]) if cfg["triple"] > 0 else np.inf
@@ -631,6 +741,23 @@ def assign_frets(notes, cfg, allow_chords):
             n.frets = (lane,)
 
 
+def place_real_chords(notes, lanes, cfg, allow_chords):
+    """Chords where the instrument really played several pitches at once
+    (power chords, strums, piano chords), sized for the difficulty."""
+    L, gap = cfg["lanes"], cfg["chord_gap"]
+    for i, n in enumerate(notes):
+        lane = lanes[i]
+        n.lane = lane
+        roomy = ((i == 0 or n.tick - notes[i - 1].tick >= gap) and
+                 (i == len(notes) - 1 or notes[i + 1].tick - n.tick >= gap))
+        size = min(n.poly, cfg["max_chord"], L) if allow_chords and roomy else 1
+        if size <= 1:
+            n.frets = (lane,)
+        else:
+            start = min(lane, L - size)       # the root on the left, like a fretting hand
+            n.frets = tuple(range(start, start + size))
+
+
 def assign_sustains(notes, tempo, pad, min_beats):
     min_ticks = int(min_beats * RES)
     for i, n in enumerate(notes):
@@ -639,6 +766,250 @@ def assign_sustains(notes, tempo, pad, min_beats):
         end = min(end, nxt - RES // 4)        # let go a 1/16 before the next note
         sus = end - n.tick
         n.sustain = sus if sus >= min_ticks else 0
+
+
+# --------------------------------------------------------------------------
+# Instruments: separating the mix and choosing what to chart
+# --------------------------------------------------------------------------
+
+# File names recognised in a --stems folder, by role.
+STEM_NAMES = {
+    "guitar": ("guitar", "guitars", "gtr", "lead_guitar", "rhythm_guitar"),
+    "bass": ("bass",),
+    "drums": ("drums", "drum", "percussion"),
+    "vocals": ("vocals", "vocal", "vox", "voice"),
+    "piano": ("piano", "keys", "keyboard", "keyboards"),
+    "other": ("other", "synth", "synths", "harmonica", "strings", "organ", "horns"),
+}
+LABEL = {"guitar": "guitar", "bass": "bass", "piano": "piano/keys", "other": "other (synth, organ, "
+         "harmonica...)", "vocals": "vocals", "drums": "drums"}
+# How happily a part is handed to each instrument when the guitar isn't playing.
+FILL_WEIGHT = {"piano": 0.9, "other": 0.9, "guitar": 1.0, "bass": 0.6, "vocals": 0.5}
+AUDIO_EXTS = (".wav", ".flac", ".ogg", ".mp3", ".m4a", ".opus", ".aif", ".aiff")
+
+
+class SeparationUnavailable(Exception):
+    pass
+
+
+def fit_audio(y, from_sr, to_sr, n):
+    """Resample a (channels x samples) track and pad/trim it to n samples."""
+    if y.ndim == 1:
+        y = y[np.newaxis, :]
+    if from_sr != to_sr:
+        y = librosa.resample(y, orig_sr=from_sr, target_sr=to_sr)
+    if y.shape[1] < n:
+        y = np.pad(y, ((0, 0), (0, n - y.shape[1])))
+    return y[:, :n].astype(np.float32)
+
+
+def load_stem_folder(folder, sr, n):
+    stems = {}
+    for fname in sorted(os.listdir(folder)):
+        stem, ext = os.path.splitext(fname)
+        if ext.lower() not in AUDIO_EXTS:
+            continue
+        key = stem.lower().replace(" ", "_").replace("-", "_")
+        role = next((r for r, names in STEM_NAMES.items() if key in names), None)
+        if role is None or role in stems:
+            log(f"  (ignoring {fname}: not a recognised stem name)")
+            continue
+        y, ssr = decode_audio(os.path.join(folder, fname))
+        stems[role] = fit_audio(y, ssr, sr, n)
+    if not stems:
+        sys.exit(f"No stems found in {folder} (expected files like guitar.wav, bass.wav, piano.wav...)")
+    log(f"  stems: {', '.join(stems)}")
+    return stems
+
+
+def cache_root():
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    else:
+        base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    return os.path.join(base, "ch-autochart", "stems")
+
+
+def file_digest(path):
+    import hashlib
+    h = hashlib.sha1()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:20]
+
+
+def separate_demucs(path, y, sr, model_name, device, use_cache):
+    """Split the mix into instruments with Demucs (htdemucs_6s: drums, bass,
+    other, vocals, guitar, piano). Results are cached per song."""
+    folder = os.path.join(cache_root(), f"{file_digest(path)}-{model_name}")
+    n = y.shape[1]
+    if use_cache and os.path.isfile(os.path.join(folder, "done")):
+        log("  using the cached separation from an earlier run")
+        stems = {}
+        for fname in os.listdir(folder):
+            if fname.endswith(".flac"):
+                a, ssr = sf.read(os.path.join(folder, fname), always_2d=True, dtype="float32")
+                stems[fname[:-5]] = fit_audio(a.T, ssr, sr, n)
+        return stems
+
+    try:
+        import torch
+        from demucs.apply import apply_model
+        from demucs.pretrained import get_model
+    except ImportError:
+        raise SeparationUnavailable("Demucs isn't installed (pip install demucs)")
+
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    log(f"  loading the {model_name} separation model (downloaded once on first use)...")
+    try:
+        model = get_model(model_name)
+    except Exception as err:
+        raise SeparationUnavailable(f"couldn't load the {model_name} model: {err}")
+    model.eval()
+    msr = int(model.samplerate)
+    wav = y[:2] if y.shape[0] >= 2 else np.repeat(y[:1], 2, axis=0)
+    if sr != msr:
+        wav = librosa.resample(wav, orig_sr=sr, target_sr=msr)
+    t = torch.from_numpy(np.ascontiguousarray(wav, dtype=np.float32))
+    ref = t.mean(0)
+    mean, std = ref.mean(), ref.std() + 1e-8
+    log(f"  separating instruments on {device.upper()} "
+        f"({'usually under a minute' if device != 'cpu' else 'this can take a few minutes'})...")
+    import demucs.apply as dapply
+    real_tqdm = dapply.tqdm
+    if PROGRESS_HOOK:
+        class _Progress:  # forwards Demucs's progress bar to the app
+            @staticmethod
+            def tqdm(iterable, total=None, **kw):
+                items = list(iterable)
+                for i, item in enumerate(items):
+                    PROGRESS_HOOK(i / max(len(items), 1))
+                    yield item
+                PROGRESS_HOOK(1.0)
+        dapply.tqdm = _Progress
+    try:
+        with torch.no_grad():
+            out = apply_model(model, ((t - mean) / std)[None], device=device, shifts=1,
+                              split=True, overlap=0.25, progress=True)[0]
+    finally:
+        dapply.tqdm = real_tqdm
+    out = (out * std + mean).cpu().numpy()
+    stems = {name: out[i] for i, name in enumerate(model.sources)}
+
+    if use_cache:
+        try:
+            os.makedirs(folder, exist_ok=True)
+            for name, a in stems.items():
+                sf.write(os.path.join(folder, name + ".flac"), np.clip(a.T, -1, 1), msr, subtype="PCM_24")
+            open(os.path.join(folder, "done"), "w").close()
+        except OSError as err:
+            log(f"  (couldn't cache the stems: {err})")
+    return {name: fit_audio(a, msr, sr, n) for name, a in stems.items()}
+
+
+def get_stems(args, y, sr):
+    """The isolated instruments available for charting ({} = only the mix)."""
+    n = y.shape[1]
+    if args.stem:
+        s, ssr = decode_audio(args.stem)
+        return {args.instrument: fit_audio(s, ssr, sr, n)}
+    if args.stems:
+        return load_stem_folder(args.stems, sr, n)
+    if args.separate == "off":
+        return {}
+    try:
+        return separate_demucs(args.audio, y, sr, args.demucs_model, args.device, not args.no_cache)
+    except SeparationUnavailable as err:
+        if args.separate == "on":
+            sys.exit(f"Separation failed: {err}")
+        log(f"  {err}: charting the full mix instead.")
+        log("  For a chart of just the guitar:  pip install demucs")
+        return {}
+
+
+def bar_index(times, tempo, pad, bar_ticks):
+    return (tempo.time_to_tick(np.asarray(times) + pad) // bar_ticks).astype(int)
+
+
+def choose_sources(parts, primary, mode, tempo, pad, bar_ticks, n_bars, section_bars, frame_times):
+    """Decide, bar by bar, which instrument the chart follows.
+
+    The primary instrument (guitar) wins wherever it is really playing. Where
+    it is silent, the busiest other instrument (keys, synth/organ/harmonica,
+    then bass or vocals) can take over, the way Guitar Hero charts the piano
+    intro or the organ break. In "smart" mode another instrument can also
+    take over when the guitar is only holding a chord while something else
+    carries the song. Switching costs something, so the chart sticks with an
+    instrument for whole passages instead of flickering between them; switches
+    are cheaper where a new section starts."""
+    names = list(parts)
+    act = {s: np.zeros(n_bars) for s in names}
+    pres = {s: np.zeros(n_bars) for s in names}
+    variety = {s: np.zeros(n_bars) for s in names}
+    fb = np.clip(bar_index(frame_times, tempo, pad, bar_ticks), 0, n_bars - 1)
+    for s in names:
+        notes, on = parts[s]
+        for n in notes:
+            b = n.tick // bar_ticks
+            if 0 <= b < n_bars:
+                act[s][b] += 1
+        m = min(len(on), len(fb))
+        pres[s] = np.bincount(fb[:m], weights=on[:m].astype(float), minlength=n_bars)[:n_bars] / \
+            np.maximum(np.bincount(fb[:m], minlength=n_bars)[:n_bars], 1)
+        by_bar = {}
+        for n in notes:
+            by_bar.setdefault(n.tick // bar_ticks, set()).add(int(round(n.pitch)))
+        for b, ps in by_bar.items():
+            if 0 <= b < n_bars:
+                variety[s][b] = len(ps)
+
+    score = np.zeros((len(names), n_bars))
+    for i, s in enumerate(names):
+        for b in range(n_bars):
+            if s == primary:
+                playing = act[s][b] > 0 or pres[s][b] > 0.25
+                score[i, b] = 2.0 + 0.5 * min(act[s][b], 8) if playing else 0.0
+            else:
+                p_playing = act[primary][b] > 0 or pres[primary][b] > 0.25 if primary in act else False
+                p_idle = act[primary][b] <= 1 if primary in act else True
+                allowed = (mode == "smart" and p_idle) or not p_playing
+                busy = act[s][b] >= 2
+                fun = 0.5 * min(act[s][b], 8) + 0.15 * min(variety[s][b], 6)
+                score[i, b] = FILL_WEIGHT.get(s, 0.5) * fun if (allowed and busy) else -1.0
+
+    # Viterbi over bars: maximise score minus switching costs.
+    k = len(names)
+    switch = np.where(np.isin(np.arange(n_bars), section_bars), 1.0, 2.0)
+    total = score[:, 0].copy()
+    back = np.zeros((k, n_bars), int)
+    for b in range(1, n_bars):
+        trans = total[:, None] - switch[b] * (1 - np.eye(k))
+        back[:, b] = np.argmax(trans, axis=0)
+        total = trans[back[:, b], np.arange(k)] + score[:, b]
+    path = [int(np.argmax(total))]
+    for b in range(n_bars - 1, 0, -1):
+        path.append(int(back[path[-1], b]))
+    return [names[i] for i in path[::-1]]
+
+
+def charted_audio(stems, chosen, tempo, pad, bar_ticks, sr, n, fade=0.02):
+    """The audio of whatever the chart follows (guitar, or keys where the
+    keys were charted), to be muted when the player misses notes."""
+    edges = tempo.tick_to_time(np.arange(len(chosen) + 1) * bar_ticks) - pad
+    out = np.zeros_like(next(iter(stems.values())))
+    for s in set(chosen):
+        gain = np.zeros(n, np.float32)
+        for b, c in enumerate(chosen):
+            if c == s:
+                a, e = (int(np.clip(x * sr, 0, n)) for x in (edges[b], edges[b + 1]))
+                gain[a:e] = 1.0
+        # short ramps instead of hard cuts at the bar lines
+        w = max(1, int(fade * sr))
+        gain = np.convolve(gain, np.ones(w, np.float32) / w, mode="same")
+        out += stems[s] * gain
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -865,8 +1236,32 @@ def parse_args(argv=None):
                        help="shortest sustain to keep, in beats (default 0.5)")
     chart.add_argument("--star-power-every", type=int, default=8,
                        help="bars between star power phrases; 0 disables (default 8)")
-    chart.add_argument("--stem", help="isolated guitar/bass audio to analyze instead of the full mix "
-                                      "(must line up with the main audio)")
+
+    inst = ap.add_argument_group("instruments (what gets charted)")
+    inst.add_argument("--separate", choices=["auto", "on", "off"], default="auto",
+                      help="split the song into instruments with Demucs and chart only the guitar "
+                           "(auto = when Demucs is installed; off = chart the full mix)")
+    inst.add_argument("--fill", choices=["smart", "gaps", "off"], default="smart",
+                      help="where the guitar isn't playing, chart another instrument: "
+                           "smart = in gaps and where the guitar only holds a chord while something "
+                           "else carries the song (default); gaps = only where the guitar is silent; "
+                           "off = guitar only, rests stay rests")
+    inst.add_argument("--fill-from", default=None,
+                      help="instruments allowed to fill in, in any of piano,other,bass,vocals,guitar "
+                           "(default: piano,other for guitar charts; none for bass charts)")
+    inst.add_argument("--split-audio", action="store_true",
+                      help="write the charted part to its own track (guitar.ogg / bass.ogg) so "
+                           "Clone Hero mutes it when you miss, like the real games")
+    inst.add_argument("--stems", metavar="FOLDER",
+                      help="use stems you already separated (guitar.wav, bass.wav, piano.wav, "
+                           "vocals.wav, drums.wav, other.wav...) instead of running Demucs")
+    inst.add_argument("--stem", help="a single isolated guitar (or bass) track to chart")
+    inst.add_argument("--gate-db", type=float, default=30.0,
+                      help="ignore an instrument when it's this many dB below its loud parts; lower "
+                           "if separation bleed gets charted, raise if quiet playing is missed (30)")
+    inst.add_argument("--demucs-model", default="htdemucs_6s", help="Demucs model (default htdemucs_6s)")
+    inst.add_argument("--device", default="auto", help="auto, cpu, cuda or mps (default auto)")
+    inst.add_argument("--no-cache", action="store_true", help="don't reuse/save separated stems")
 
     tempo = ap.add_argument_group("tempo")
     tempo.add_argument("--bpm", type=float, help="force a constant tempo (BPM)")
@@ -890,13 +1285,61 @@ def parse_args(argv=None):
         ap.error(f"no such file: {args.audio}")
     if args.stem and not os.path.isfile(args.stem):
         ap.error(f"no such file: {args.stem}")
+    if args.stems and not os.path.isdir(args.stems):
+        ap.error(f"no such folder: {args.stems}")
+    if args.fill_from is None:
+        args.fill_from = "piano,other" if args.instrument == "guitar" else ""
+    args.fillers = [f.strip().lower() for f in args.fill_from.split(",") if f.strip()]
+    bad = [f for f in args.fillers if f not in FILL_WEIGHT]
+    if bad:
+        ap.error(f"unknown --fill-from instrument: {', '.join(bad)}")
     return args
 
 
-def main(argv=None):
-    args = parse_args(argv)
+# --------------------------------------------------------------------------
+# Pipeline (shared by the command line and the web app)
+# --------------------------------------------------------------------------
+
+CHARTABLE = ["guitar", "bass", "piano", "other", "vocals"]
+
+
+@dataclass
+class Project:
+    """Everything learned about one song, before a chart plan is fixed."""
+    args: argparse.Namespace
+    y: np.ndarray            # full mix, channels x samples
+    sr: int
+    stems: dict              # instrument -> audio, same shape as y
+    an: Analysis
+    tempo: TempoMap
+    pad: float               # seconds of silence added in front
+    pad_samples: int
+    tempo_mode: str
+    bpm_text: str
+    bar_ticks: int
+    n_bars: int
+    sections: list           # [(tick, name)]
+    first_bar: int
+    parts: dict              # instrument -> (notes, per-frame "is playing")
+    recommended: list        # instrument per bar (None = rest); None without stems
+    mix_notes: list          # full-mix notes, used when there are no stems
+
+    @property
+    def primary(self):
+        return self.args.instrument
+
+    @property
+    def duration(self):
+        return self.y.shape[1] / self.sr
+
+    def bar_times(self):
+        """Start time of each bar (and the end of the last) in the song's own timeline."""
+        return self.tempo.tick_to_time(np.arange(self.n_bars + 1) * self.bar_ticks) - self.pad
+
+
+def song_meta(args):
     tags = read_tags(args.audio)
-    meta = dict(
+    return dict(
         title=args.title or tags.get("title") or os.path.splitext(os.path.basename(args.audio))[0],
         artist=args.artist or tags.get("artist") or tags.get("album_artist") or "Unknown Artist",
         album=args.album or tags.get("album") or "",
@@ -904,63 +1347,168 @@ def main(argv=None):
         year=args.year or (tags.get("date") or tags.get("year") or "")[:4],
         charter=args.charter)
 
+
+def prepare(args, candidates=None):
+    """Read, separate and analyze a song and recommend a chart plan.
+    `candidates` = instruments to transcribe (default: the charted one plus
+    the allowed fill-ins); the web app asks for all of them so any can be picked."""
+    log(f"Reading {os.path.basename(args.audio)}")
+    y, sr = decode_audio(args.audio)
+    n = y.shape[1]
+    log("Separating instruments")
+    stems = get_stems(args, y, sr)
+
+    def mono22(a):
+        return librosa.resample(librosa.to_mono(a), orig_sr=sr, target_sr=SR)
+
+    log("Finding the beat")
+    an = analyze(mono22(y), args.instrument, args.bpm_hint)
+    an.duration = n / sr
+    tempo, pad, mode, bpm_text = build_tempo(an, args)
+    pad_samples = int(round(pad * sr))
+    pad = pad_samples / sr
+    log(f"  tempo: {bpm_text} ({mode} map), lead-in {pad:.2f}s")
+    bar_ticks = args.time_signature * RES
+    n_bars = int(tempo.time_to_tick(an.duration + pad) // bar_ticks) + 1
+    sections, _ = find_sections(an, tempo, pad, args.time_signature)
+    first_bar = sections[0][0] // bar_ticks if sections else 0
+
+    primary = args.instrument
+    parts, recommended, mix_notes = {}, None, []
+    if primary in stems:
+        fillers = [f for f in args.fillers if f != primary] if args.fill != "off" else []
+        names = candidates or [primary] + fillers
+        names = [primary] + [x for x in names if x != primary and x in stems]
+        log("Listening to each instrument")
+        for name in names:
+            mono = mono22(stems[name])
+            if np.max(np.abs(mono)) < 1e-4:
+                continue
+            log(f"  listening to the {LABEL[name]}...")
+            pa = analyze(mono, "bass" if name == "bass" else "guitar", None, quiet=True)
+            found = detect_notes(pa, args.density, args.all_onsets, mix=an, gate_db=args.gate_db, src=name)
+            qn = quantize(found, tempo, pad, args.triplets)[0] if found else []
+            parts[name] = (qn, presence(pa, an, args.gate_db))
+        if primary not in parts:
+            parts[primary] = ([], np.zeros(len(an.times), bool))
+        log("Planning the chart")
+        pool = {k: v for k, v in parts.items() if k == primary or k in fillers}
+        recommended = choose_sources(pool, primary, args.fill if len(pool) > 1 else "off", tempo,
+                                     pad, bar_ticks, n_bars, [t // bar_ticks for t, _ in sections],
+                                     an.times)
+        # bars where the chosen instrument plays nothing are simply rests
+        busy = {k: {n.tick // bar_ticks for n in v[0]} for k, v in parts.items()}
+        recommended = [c if b in busy.get(c, ()) else None for b, c in enumerate(recommended)]
+    else:
+        log("Listening to the mix")
+        found = detect_notes(an, args.density, args.all_onsets)
+        mix_notes = quantize(found, tempo, pad, args.triplets)[0] if found else []
+    return Project(args=args, y=y, sr=sr, stems=stems, an=an, tempo=tempo, pad=pad,
+                   pad_samples=pad_samples, tempo_mode=mode, bpm_text=bpm_text, bar_ticks=bar_ticks,
+                   n_bars=n_bars, sections=sections, first_bar=first_bar, parts=parts,
+                   recommended=recommended, mix_notes=mix_notes)
+
+
+def plan_notes(proj, plan):
+    """The notes a plan selects: per bar, the chosen instrument's notes."""
+    if not proj.parts:
+        return sorted(proj.mix_notes, key=lambda n: n.tick)
+    last = proj.n_bars - 1
+    raw = [n for name, (notes, _) in proj.parts.items() for n in notes
+           if plan[min(n.tick // proj.bar_ticks, last)] == name]
+    return sorted(raw, key=lambda n: n.tick)
+
+
+def build_charts(proj, plan=None, diffs=None):
+    """All difficulties for a plan (instrument per bar, None = rest).
+    Returns {difficulty: (notes, star_power_phrases)}; empty if nothing to chart."""
+    args = proj.args
+    plan = proj.recommended if plan is None else plan
+    raw = plan_notes(proj, plan)
+    if not raw:
+        return {}
+    expert = thin(raw, DIFFICULTIES["expert"], len(raw), proj.tempo, proj.pad)
+    phrases_all = star_power(expert, args.time_signature, args.star_power_every)
+    tracks = {}
+    for diff in diffs or args.diffs:
+        cfg = DIFFICULTIES[diff]
+        base = expert if diff == "expert" else thin(expert, cfg, len(expert), proj.tempo, proj.pad)
+        notes = [replace(n) for n in base]
+        allow_chords = not args.no_chords and not (args.instrument == "bass" and diff != "expert")
+        assign_frets(notes, cfg, allow_chords, real_chords=bool(proj.parts))
+        if not args.no_sustains:
+            assign_sustains(notes, proj.tempo, proj.pad, args.min_sustain)
+        ticks = np.array([n.tick for n in notes])
+        phrases = [(s0, ln) for s0, ln in phrases_all if np.any((ticks >= s0) & (ticks < s0 + ln))]
+        tracks[diff] = (notes, phrases)
+    return tracks
+
+
+def write_song(proj, tracks, plan, folder, meta, album_art=None, split_audio=False):
+    """Write notes.chart, song.ogg (+ the charted part's own track), song.ini, album.png."""
+    args, tempo, pad = proj.args, proj.tempo, proj.pad
+    plan = proj.recommended if plan is None else plan
+    os.makedirs(folder, exist_ok=True)
+    for old in ("song.ogg", "guitar.ogg", "bass.ogg"):
+        if os.path.exists(os.path.join(folder, old)):
+            os.remove(os.path.join(folder, old))
+    if split_audio and proj.parts:
+        chosen = [c or proj.primary for c in plan]
+        part_audio = charted_audio({k: proj.stems[k] for k in set(chosen)}, chosen, tempo, pad,
+                                   proj.bar_ticks, proj.sr, proj.y.shape[1])
+        write_ogg(part_audio, proj.sr, proj.pad_samples, os.path.join(folder, f"{proj.primary}.ogg"))
+        write_ogg(proj.y - part_audio, proj.sr, proj.pad_samples, os.path.join(folder, "song.ogg"))
+    else:
+        if split_audio:
+            log("  (--split-audio needs separated instruments; writing a single song.ogg)")
+        write_ogg(proj.y, proj.sr, proj.pad_samples, os.path.join(folder, "song.ogg"))
+    write_chart(os.path.join(folder, "notes.chart"), meta, tempo, args.time_signature,
+                proj.sections, tracks, args.instrument)
+    preview_sec = preview_start([(float(tempo.tick_to_time(t)), nm) for t, nm in proj.sections],
+                                proj.an, pad)
+    song_ms = int(round((proj.duration + pad) * 1000))
+    rating_notes = tracks.get("expert", next(iter(tracks.values())))[0]
+    write_ini(os.path.join(folder, "song.ini"), meta, song_ms, int(round(preview_sec * 1000)),
+              difficulty_rating(rating_notes, proj.duration), args.instrument)
+    if album_art:
+        write_album_art(album_art, os.path.join(folder, "album.png"))
+
+
+def describe_plan(proj, plan):
+    """Lines like 'bars 1-8: piano/keys' for passages not charted from the main instrument."""
+    if not proj.parts:
+        return []
+    out, b = [], 0
+    while b < len(plan):
+        e = b
+        while e + 1 < len(plan) and plan[e + 1] == plan[b]:
+            e += 1
+        if plan[b] not in (None, proj.primary):
+            lo, hi = b - proj.first_bar + 1, e - proj.first_bar + 1
+            out.append(f"{'bar' if lo == hi else 'bars'} {lo}{'' if lo == hi else f'-{hi}'}: {LABEL[plan[b]]}")
+        b = e + 1
+    return out
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    meta = song_meta(args)
     folder = os.path.join(args.out, safe_name(f"{meta['artist']} - {meta['title']}"))
     if os.path.exists(folder) and not args.force:
         sys.exit(f"'{folder}' already exists (use --force to overwrite).")
 
-    log(f"Reading {args.audio}")
-    y_full, sr_full = decode_audio(args.audio)
-    if args.stem:
-        y_an, sr_an = decode_audio(args.stem)
-    else:
-        y_an, sr_an = y_full, sr_full
-    mono = librosa.resample(librosa.to_mono(y_an), orig_sr=sr_an, target_sr=SR)
-
-    log("Analyzing")
-    an = analyze(mono, args.instrument, args.bpm_hint)
-    an.duration = y_full.shape[1] / sr_full
-
-    tempo, pad, mode, bpm_text = build_tempo(an, args)
-    pad_samples = int(round(pad * sr_full))
-    pad = pad_samples / sr_full
-    log(f"  tempo: {bpm_text} ({mode} map), lead-in {pad:.2f}s")
-
+    proj = prepare(args)
     log("Charting")
-    raw = detect_notes(an, args.density, args.all_onsets)
-    if not raw:
-        sys.exit("No notes detected - is the file silent?")
-    expert, snap_ms = quantize(raw, tempo, pad, args.triplets)
-    expert = thin(expert, DIFFICULTIES["expert"], len(expert), tempo, pad)
-
-    tracks = {}
-    every = args.star_power_every
-    phrases_all = star_power(expert, args.time_signature, every)
-    for diff in args.diffs:
-        cfg = DIFFICULTIES[diff]
-        base = expert if diff == "expert" else thin(expert, cfg, len(expert), tempo, pad)
-        notes = [Note(n.time, n.strength, n.pitch, n.end_time, tick=n.tick) for n in base]
-        allow_chords = not args.no_chords and not (args.instrument == "bass" and diff != "expert")
-        assign_frets(notes, cfg, allow_chords)
-        if not args.no_sustains:
-            assign_sustains(notes, tempo, pad, args.min_sustain)
-        ticks = np.array([n.tick for n in notes])
-        phrases = [(s, l) for s, l in phrases_all if np.any((ticks >= s) & (ticks < s + l))]
-        tracks[diff] = (notes, phrases)
-
-    sections, _ = find_sections(an, tempo, pad, args.time_signature)
-    preview_sec = preview_start([(float(tempo.tick_to_time(t)), n) for t, n in sections], an, pad)
+    tracks = build_charts(proj)
+    if not tracks:
+        sys.exit(f"No {args.instrument} notes found in this song." if proj.parts
+                 else "No notes detected - is the file silent?")
+    expert = tracks.get("expert", next(iter(tracks.values())))[0]
+    snap_ms = float(np.median(np.abs(proj.tempo.tick_to_time([n.tick for n in expert]) -
+                                     (np.array([n.time for n in expert]) + proj.pad)))) * 1000
 
     log("Writing song folder")
-    os.makedirs(folder, exist_ok=True)
-    write_ogg(y_full, sr_full, pad_samples, os.path.join(folder, "song.ogg"))
-    write_chart(os.path.join(folder, "notes.chart"), meta, tempo, args.time_signature,
-                sections, tracks, args.instrument)
-    song_ms = int(round((an.duration + pad) * 1000))
-    rating_notes = tracks.get("expert", next(iter(tracks.values())))[0]
-    write_ini(os.path.join(folder, "song.ini"), meta, song_ms, int(round(preview_sec * 1000)),
-              difficulty_rating(rating_notes, an.duration), args.instrument)
-    if args.album_art:
-        write_album_art(args.album_art, os.path.join(folder, "album.png"))
+    write_song(proj, tracks, None, folder, meta, args.album_art, args.split_audio)
 
     log("")
     log(f"Done: {folder}")
@@ -971,7 +1519,15 @@ def main(argv=None):
             sus = sum(n.sustain > 0 for n in notes)
             log(f"  {diff.capitalize():7s} {len(notes):5d} notes  {chords:4d} chords  "
                 f"{sus:4d} sustains  {len(phr):2d} star power")
-    log(f"  sections: {', '.join(n for _, n in sections)}")
+    log(f"  sections: {', '.join(n for _, n in proj.sections)}")
+    if proj.parts:
+        fills = describe_plan(proj, proj.recommended)
+        log(f"  charted from the {LABEL[proj.primary]}" +
+            (", with other instruments filling in where it rests:" if fills else " only"))
+        for line in fills:
+            log(f"    {line}")
+    else:
+        log("  charted from the full mix")
     log(f"  median timing snap: {snap_ms:.1f} ms")
     log("Copy the folder into Clone Hero's Songs folder and choose Settings > General > Scan Songs.")
     return folder

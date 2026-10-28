@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ch-autochart studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/web/style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23c9a15a'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23241a1a'/%3E%3C/svg%3E">
+</head>
+<body>
+  <div class="wordmark" aria-label="ch-autochart studio">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13" fill="#c9a15a"/><circle cx="16" cy="16" r="5" fill="#241a1a"/></svg>
+    ch-autochart studio
+  </div>
+
+  <!-- 1. Upload -->
+  <section id="upload" class="screen">
+    <h1>Turn a song into a Clone Hero chart</h1>
+    <p class="lede">Drop in an audio file. It gets split into its instruments, and you decide which one the guitar chart follows, passage by passage, before you download it.</p>
+    <form id="upload-form">
+      <label class="drop" id="drop">
+        <input type="file" id="song-input" name="song" accept="audio/*,.mp3,.ogg,.wav,.flac,.m4a,.opus">
+        <strong id="drop-title">Drop a song here, or click to choose one</strong>
+        <span id="drop-sub">MP3, OGG, WAV, FLAC or M4A</span>
+      </label>
+      <div class="upload-options">
+        <label class="inline">Chart for
+          <span class="seg" role="group" aria-label="Instrument">
+            <button type="button" data-instrument="guitar" aria-pressed="true">Guitar</button>
+            <button type="button" data-instrument="bass" aria-pressed="false">Bass</button>
+          </span>
+        </label>
+      </div>
+      <details class="stems">
+        <summary>I already have separated stems</summary>
+        <p>If you split the song with another tool (Demucs, UVR, Moises…), add the tracks here and that step is skipped. Each one needs to line up with the song from its first sample.</p>
+        <input type="file" id="stems-input" multiple accept="audio/*">
+        <ul class="stem-list" id="stem-list"></ul>
+      </details>
+      <p class="form-error" id="upload-error" role="alert"></p>
+      <button class="btn primary" id="start" type="submit" disabled>Analyze song</button>
+    </form>
+  </section>
+
+  <!-- 2. Progress -->
+  <section id="progress" class="screen" hidden>
+    <h1 id="progress-title">Analyzing</h1>
+    <p class="lede">Separating a song takes a few minutes on a computer without a graphics card. You can leave this tab open and come back.</p>
+    <ol class="stages" id="stages"></ol>
+    <p class="status-line" id="status-line" aria-live="polite"></p>
+    <div class="error-box" id="progress-error" hidden>
+      <p id="progress-error-text"></p>
+      <button class="btn" type="button" id="retry">Try another song</button>
+    </div>
+  </section>
+
+  <!-- 3. Studio -->
+  <section id="studio" class="screen" hidden>
+    <div class="studio-head">
+      <div>
+        <h1 id="song-title"></h1>
+        <p class="artist" id="song-artist"></p>
+        <div class="facts" id="facts"></div>
+      </div>
+      <div class="head-actions">
+        <button class="btn quiet" type="button" id="reset-plan">Reset to recommendation</button>
+        <button class="btn primary" type="button" id="approve">Approve chart</button>
+      </div>
+    </div>
+    <p class="notice" id="notice" hidden></p>
+    <div class="recommend">
+      <h2>The chart follows</h2>
+      <div class="chips" id="plan-chips"></div>
+      <p id="plan-summary"></p>
+    </div>
+
+    <div class="transport">
+      <button class="play" type="button" id="play" aria-label="Play">
+        <svg viewBox="0 0 20 20" id="play-icon"><path d="M5 3l12 7-12 7z" fill="currentColor"/></svg>
+      </button>
+      <div class="clock"><span id="now">0:00.0</span> <small>/ <span id="total">0:00</span></small></div>
+      <label>Zoom <input type="range" id="zoom" min="0" max="100" value="35" aria-label="Zoom"></label>
+      <label><input type="checkbox" id="follow" checked> Follow playback</label>
+      <span class="spacer"></span>
+      <span class="loading-audio" id="loading-audio"></span>
+      <span class="seg" role="group" aria-label="Difficulty" id="diff-seg">
+        <button type="button" data-diff="expert" aria-pressed="true">Expert</button>
+        <button type="button" data-diff="hard" aria-pressed="false">Hard</button>
+        <button type="button" data-diff="medium" aria-pressed="false">Medium</button>
+        <button type="button" data-diff="easy" aria-pressed="false">Easy</button>
+      </span>
+    </div>
+
+    <div class="workbench">
+      <div class="timeline" id="timeline">
+        <div class="row ruler">
+          <div class="label"><span class="sub">Bars and sections</span></div>
+          <canvas id="ruler" height="44" aria-label="Timeline: click to jump"></canvas>
+        </div>
+        <div class="row plan">
+          <div class="label"><div class="name"><span>Chart plan</span></div><span class="sub">Which track each bar comes from</span></div>
+          <canvas id="plan" height="30"></canvas>
+        </div>
+        <div id="track-rows"></div>
+        <div class="row chart">
+          <div class="label"><div class="name"><span id="strip-title">Chart preview</span></div><span class="sub" id="strip-sub"></span></div>
+          <canvas id="strip" height="96"></canvas>
+        </div>
+        <div class="row">
+          <div class="label"><span class="sub">Scroll</span></div>
+          <div class="scrollbar"><input type="range" id="hscroll" min="0" max="1000" value="0" aria-label="Scroll the timeline"></div>
+        </div>
+        <p class="hint" id="hint">Drag across a track to chart that passage from it. Drag across a highlighted stretch to clear it and leave a rest. Space plays and pauses.</p>
+      </div>
+      <div class="highway-panel">
+        <header><strong>Highway preview</strong><span class="following" id="following"></span></header>
+        <canvas id="highway" aria-label="Scrolling chart preview"></canvas>
+        <div class="hw-stats" id="hw-stats"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4. Details -->
+  <section id="details" class="screen" hidden>
+    <h1>Album art and details</h1>
+    <p class="lede">These show up in Clone Hero's song list. Everything is filled in from the file's tags where it could be; change anything you like.</p>
+    <form id="details-form" class="details-grid">
+      <div>
+        <label class="art" id="art-drop">
+          <input type="file" id="art-input" accept="image/*">
+          <img id="art-img" alt="" hidden>
+          <span id="art-hint">Drop album art here, or click to choose an image</span>
+        </label>
+        <div class="art-actions"><button class="btn small quiet" type="button" id="art-clear" hidden>Remove image</button></div>
+      </div>
+      <div class="fields">
+        <label class="field wide"><span>Song title</span><input type="text" name="title" required></label>
+        <label class="field"><span>Artist</span><input type="text" name="artist"></label>
+        <label class="field"><span>Album</span><input type="text" name="album"></label>
+        <label class="field"><span>Year</span><input type="text" name="year" inputmode="numeric" maxlength="4"></label>
+        <label class="field"><span>Genre</span><input type="text" name="genre"></label>
+        <label class="field wide"><span>Charter</span><input type="text" name="charter"></label>
+        <fieldset>
+          <legend>Difficulties</legend>
+          <div class="checks">
+            <label class="check"><input type="checkbox" name="diff_expert" checked> Expert</label>
+            <label class="check"><input type="checkbox" name="diff_hard" checked> Hard</label>
+            <label class="check"><input type="checkbox" name="diff_medium" checked> Medium</label>
+            <label class="check"><input type="checkbox" name="diff_easy" checked> Easy</label>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Options</legend>
+          <label class="check" id="split-wrap"><input type="checkbox" name="split_audio" checked>
+            <span>Give the charted part its own audio track<small>It drops out when you miss notes, like in the real games.</small></span></label>
+          <label class="check" id="install-wrap" hidden><input type="checkbox" name="install">
+            <span>Also put it in my Clone Hero songs folder<small id="install-path"></small></span></label>
+        </fieldset>
+        <p class="form-error" id="details-error" role="alert"></p>
+        <div class="actions">
+          <button class="btn quiet" type="button" id="back-to-studio">Back to the studio</button>
+          <button class="btn primary" type="submit" id="build">Build chart</button>
+        </div>
+      </div>
+    </form>
+  </section>
+
+  <!-- 5. Done -->
+  <section id="done" class="screen" hidden>
+    <h1>Your chart is ready</h1>
+    <p class="lede" id="done-lede"></p>
+    <div class="download-card">
+      <img id="done-art" alt="" hidden><div class="no-art" id="done-no-art"></div>
+      <div>
+        <h2 id="done-name"></h2>
+        <p id="done-files"></p>
+        <a class="btn primary" id="download" href="#" download>Download</a>
+      </div>
+    </div>
+    <ol class="next-steps" id="next-steps"></ol>
+    <div style="display:flex; gap:12px">
+      <button class="btn" type="button" id="edit-again">Back to the studio</button>
+      <button class="btn quiet" type="button" id="another">Chart another song</button>
+    </div>
+  </section>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>
