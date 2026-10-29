@@ -35,6 +35,9 @@ a = Analysis(  # noqa: F821
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
+    # numba (used by librosa) only caches compiled code for functions whose
+    # .py file exists on disk, so ship librosa as source files too.
+    module_collection_mode={"librosa": "pyz+py"},
     excludes=["matplotlib", "IPython", "pytest", "tkinter", "torch.utils.tensorboard", "tensorboard",
               "triton", "torchvision"],
     noarchive=False,

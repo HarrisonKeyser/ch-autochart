@@ -132,7 +132,7 @@ jobs:
           $un = Start-Process -FilePath "$env:LOCALAPPDATA\Programs\ch-autochart\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES" -Wait -PassThru
           "Uninstall exit code: $($un.ExitCode)"
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: ch-autochart-setup
           path: dist/ch-autochart-setup.exe

@@ -40,6 +40,9 @@ def prepare_environment():
     models = os.path.join(BASE, "models")
     if os.path.isdir(models):
         os.environ["CH_AUTOCHART_MODELS"] = models
+    # librosa asks numba to cache compiled code on disk; inside the packaged
+    # program that has to go somewhere writable.
+    os.environ.setdefault("NUMBA_CACHE_DIR", os.path.join(data_dir(), "numba-cache"))
     if FROZEN or sys.stdout is None:
         log = open(os.path.join(data_dir(), "log.txt"), "a", encoding="utf-8", buffering=1)
         log.write(f"\n--- started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
