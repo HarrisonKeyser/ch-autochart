@@ -2,9 +2,10 @@
 #
 # - Run it by hand: Actions tab -> "Windows installer" -> "Run workflow".
 #   The installer appears under the run's "Artifacts".
-# - Publish a release: push a tag like v2.0.0 (or create a release on GitHub
-#   with a new v... tag). The installer is attached to that release, and the
-#   website's download button always points at the newest one.
+# - Publish a release: on GitHub, Releases -> "Draft a new release", type a new
+#   tag like v2.0.1, and click "Publish release" (pushing a v... tag works too).
+#   This builds the installer and attaches it to that release; the website's
+#   download button always points at the newest one.
 #
 # Before packaging, it charts a test band song with the REAL Demucs model and
 # scores the result, and after packaging it installs the program silently and
@@ -16,6 +17,8 @@ on:
   workflow_dispatch:
   push:
     tags: ["v*"]
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -143,5 +146,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/ch-autochart-setup.exe
-          body_path: packaging/release-notes.md
+          tag_name: ${{ github.ref_name }}
           name: ch-autochart ${{ github.ref_name }}
+          body_path: packaging/release-notes.md

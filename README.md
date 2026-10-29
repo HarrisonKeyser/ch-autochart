@@ -52,8 +52,10 @@ straight into the game from then on. Uninstall from Settings → Apps.
 Each installer is built and tested by GitHub on a clean Windows machine (see
 `.github/workflows/windows-installer.yml`): it charts a test band song with the
 real separation model and scores it, then installs the program silently and
-runs its self-test before anything is published. To publish a new version,
-push a tag such as `v2.0.1`.
+runs its self-test before anything is published. To publish a new version:
+on GitHub, open **Releases → Draft a new release**, type a new tag such as
+`v2.0.1`, and click **Publish release**. About 40 minutes later the installer
+is attached to it, and the website's download button serves the new version.
 
 ## Install from source
 
