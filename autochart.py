@@ -48,7 +48,7 @@ try:
 except ImportError as err:  # pragma: no cover
     sys.exit(f"Missing dependency ({err.name}). Install with:  pip install -r requirements.txt")
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 RES = 192            # chart ticks per beat (the standard .chart resolution)
 SR = 22050           # analysis sample rate
@@ -95,6 +95,19 @@ def have(cmd):
     return shutil.which(cmd) is not None
 
 
+def ffmpeg_path():
+    """ffmpeg on the PATH, or the copy bundled with the imageio-ffmpeg package
+    (the Windows installer ships that one). None when neither exists."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
 def run(cmd):
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
@@ -127,12 +140,16 @@ def decode_audio(path):
     try:
         y, sr = librosa.load(path, sr=None, mono=False)
     except Exception as first_err:
-        if not have("ffmpeg"):
+        ffmpeg = ffmpeg_path()
+        if not ffmpeg:
             sys.exit(f"Could not read '{path}' ({first_err}).\n"
                      "Install ffmpeg (and put it on your PATH) to open this format.")
         with tempfile.TemporaryDirectory() as td:
             wav = os.path.join(td, "decoded.wav")
-            run(["ffmpeg", "-v", "error", "-y", "-i", path, "-vn", "-c:a", "pcm_f32le", wav])
+            try:
+                run([ffmpeg, "-v", "error", "-y", "-i", path, "-vn", "-c:a", "pcm_f32le", wav])
+            except subprocess.CalledProcessError:
+                sys.exit(f"Could not read '{path}': it doesn't look like an audio file ffmpeg can open.")
             y, sr = librosa.load(wav, sr=None, mono=False)
     if y.ndim == 1:
         y = y[np.newaxis, :]
@@ -145,12 +162,13 @@ def write_ogg(y, sr, pad_samples, out_path):
     peak = float(np.max(np.abs(data))) if data.size else 0.0
     if peak > 1.0:
         data = data / peak
-    if have("ffmpeg"):
+    ffmpeg = ffmpeg_path()
+    if ffmpeg:
         with tempfile.TemporaryDirectory() as td:
             wav = os.path.join(td, "padded.wav")
             sf.write(wav, data, sr, subtype="FLOAT")
             try:
-                run(["ffmpeg", "-v", "error", "-y", "-i", wav, "-c:a", "libvorbis", "-q:a", "6", out_path])
+                run([ffmpeg, "-v", "error", "-y", "-i", wav, "-c:a", "libvorbis", "-q:a", "6", out_path])
                 return
             except subprocess.CalledProcessError:
                 pass  # fall back to libsndfile's encoder below
@@ -158,7 +176,15 @@ def write_ogg(y, sr, pad_samples, out_path):
 
 
 def read_tags(path):
-    """Title/artist/album/... from the file's tags, via ffprobe when available."""
+    """Title/artist/album/... from the file's tags (mutagen, else ffprobe)."""
+    try:
+        import mutagen
+        f = mutagen.File(path, easy=True)
+        if f is not None and f.tags:
+            return {k.lower(): (v[0] if isinstance(v, list) and v else str(v))
+                    for k, v in f.tags.items() if v}
+    except Exception:
+        pass
     if not have("ffprobe"):
         return {}
     try:

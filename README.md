@@ -9,9 +9,12 @@ written from the guitar alone. Where the guitar sits out, the chart hands the
 part to whatever is carrying the song instead, the way Guitar Hero charts the
 piano intro or the organ break: the keys, a synth, a harmonica.
 
-There are two ways to use it:
+There are three ways to use it:
 
-- **The studio** (`python app.py`): a local web app where you upload a song,
+- **The Windows program** (easiest): download
+  [`ch-autochart-setup.exe`](https://github.com/HarrisonKeyser/ch-autochart/releases/latest/download/ch-autochart-setup.exe),
+  run it, and open ch-autochart from the Start menu. Nothing else to install.
+- **The studio from source** (`python app.py`): a local web app where you upload a song,
   listen to each separated instrument, see and repaint which one the chart
   follows bar by bar, preview the chart on a scrolling highway, add album art,
   and download the finished song.
@@ -32,7 +35,27 @@ My Band - My Song/
 Put that folder in Clone Hero's `Songs` folder and choose
 **Settings → General → Scan Songs**.
 
-## Install
+## Install on Windows
+
+1. Download [`ch-autochart-setup.exe`](https://github.com/HarrisonKeyser/ch-autochart/releases/latest/download/ch-autochart-setup.exe)
+   from the [latest release](https://github.com/HarrisonKeyser/ch-autochart/releases/latest).
+2. Run it. Windows may say "Windows protected your PC", because the installer
+   isn't code-signed: click **More info**, then **Run anyway**. It installs for
+   your user only, with no admin prompt.
+3. Open **ch-autochart** from the Start menu.
+
+It needs Windows 10 or 11 (64-bit). Everything it needs is included: Python,
+the separation model and ffmpeg. The first time you finish a chart, point it at
+your Clone Hero Songs folder (if it didn't find it already) and charts go
+straight into the game from then on. Uninstall from Settings → Apps.
+
+Each installer is built and tested by GitHub on a clean Windows machine (see
+`.github/workflows/windows-installer.yml`): it charts a test band song with the
+real separation model and scores it, then installs the program silently and
+runs its self-test before anything is published. To publish a new version,
+push a tag such as `v2.0.1`.
+
+## Install from source
 
 You need Python 3.9 or newer.
 

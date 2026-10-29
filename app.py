@@ -17,6 +17,7 @@ import json
 import os
 import queue
 import shutil
+import sys
 import tempfile
 import threading
 import traceback
@@ -35,7 +36,7 @@ import autochart as ac
 import librosa
 import soundfile as sf
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))  # PyInstaller-aware
 WEB = os.path.join(HERE, "web")
 JOBS_ROOT = os.path.join(tempfile.gettempdir(), "ch-autochart-studio")
 
@@ -201,14 +202,54 @@ def chart_preview(job, plan):
     return dict(charts=out, summary=lines)
 
 
+# Settings remembered between runs (the desktop program's chosen Songs folder).
+def settings_path():
+    base = os.environ.get("LOCALAPPDATA") if os.name == "nt" else os.path.expanduser("~/.config")
+    return os.path.join(base or os.path.expanduser("~"), "ch-autochart", "settings.json")
+
+
+def load_settings():
+    try:
+        with open(settings_path(), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(**changes):
+    data = load_settings()
+    data.update(changes)
+    os.makedirs(os.path.dirname(settings_path()), exist_ok=True)
+    with open(settings_path(), "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+
+
 def find_songs_folder():
+    chosen = load_settings().get("songs_folder")
+    if chosen and os.path.isdir(chosen):
+        return chosen
     home = os.path.expanduser("~")
-    for p in (os.path.join(home, "Documents", "Clone Hero", "Songs"),
-              os.path.join(home, "Clone Hero", "Songs"),
-              os.path.join(home, ".clonehero", "Songs")):
+    docs = [os.path.join(home, "Documents"), os.path.join(home, "OneDrive", "Documents")]
+    if os.name == "nt":
+        docs.insert(0, windows_documents())
+    candidates = [os.path.join(d, "Clone Hero", "Songs") for d in docs if d]
+    candidates += [os.path.join(home, "Clone Hero", "Songs"), os.path.join(home, ".clonehero", "Songs")]
+    for p in candidates:
         if os.path.isdir(p):
             return p
     return None
+
+
+def windows_documents():
+    """The real Documents folder (it may have been moved, e.g. into OneDrive)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+        ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buf)  # CSIDL_PERSONAL
+        return buf.value or None
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -362,6 +403,19 @@ def job_download(job_id):
 
 # --------------------------------------------------------------------------
 
+def start_worker():
+    """Start the background thread that analyzes uploaded songs (once)."""
+    if not getattr(start_worker, "started", False):
+        os.makedirs(JOBS_ROOT, exist_ok=True)
+        threading.Thread(target=worker, daemon=True).start()
+        start_worker.started = True
+
+
+@app.get("/api/settings")
+def get_settings():
+    return jsonify(songs_folder=find_songs_folder(), version=ac.__version__)
+
+
 def main():
     ap = argparse.ArgumentParser(description="ch-autochart studio (local web app)")
     ap.add_argument("--port", type=int, default=8765)
@@ -369,8 +423,7 @@ def main():
                     help="address to listen on (default: this computer only)")
     ap.add_argument("--no-browser", action="store_true", help="don't open a browser window")
     args = ap.parse_args()
-    os.makedirs(JOBS_ROOT, exist_ok=True)
-    threading.Thread(target=worker, daemon=True).start()
+    start_worker()
     url = f"http://{'127.0.0.1' if args.host in ('0.0.0.0', '') else args.host}:{args.port}"
     print(f"ch-autochart studio running at {url}  (Ctrl+C to stop)")
     if not args.no_browser:

@@ -1,0 +1,135 @@
+# Builds the Windows installer (ch-autochart-setup.exe) on a Windows machine.
+#
+# - Run it by hand: Actions tab -> "Windows installer" -> "Run workflow".
+#   The installer appears under the run's "Artifacts".
+# - Publish a release: push a tag like v2.0.0 (or create a release on GitHub
+#   with a new v... tag). The installer is attached to that release, and the
+#   website's download button always points at the newest one.
+#
+# Before packaging, it charts a test band song with the REAL Demucs model and
+# scores the result, and after packaging it installs the program silently and
+# runs its self-test, so a broken installer never gets published.
+
+name: Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      PYTHONIOENCODING: utf-8
+      TORCH_HOME: ${{ github.workspace }}\models
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          pip install pyinstaller pywebview imageio-ffmpeg mutagen
+
+      - name: Download the separation model
+        run: python -c "from demucs.pretrained import get_model; m = get_model('htdemucs_6s'); print(m.sources)"
+
+      - name: Chart a test band song with real separation
+        shell: bash
+        run: |
+          mkdir -p build
+          python tests/make_band_song.py build/band.wav
+          python autochart.py build/band.wav --separate off --artist CI --title "Full mix" -o build --force
+          python autochart.py build/band.wav --separate on --artist CI --title "Separated" -o build --force --fill off
+          python autochart.py build/band.wav --separate on --artist CI --title "Smart fill" -o build --force
+          cd tests
+          {
+            echo "## Test band song, real Demucs separation"
+            for name in "Full mix" "Separated" "Smart fill"; do
+              echo "### $name"; echo '```'; python check_guitar.py "../build/CI - $name" ../build/band.wav; echo '```'
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Chart real recordings (no answer key, just checks they work)
+        shell: bash
+        continue-on-error: true
+        run: |
+          {
+            echo "## Real recordings"
+            for ex in fishin vibeace; do
+              f=$(python -c "import librosa; print(librosa.ex('$ex', hq=True))")
+              echo "### $ex"; echo '```'
+              python autochart.py "$f" --separate on -o build --force --title "$ex" --artist Example | tail -n 14
+              echo '```'
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Package the program
+        run: pyinstaller packaging/ch-autochart.spec --noconfirm --clean
+
+      - name: Self-test the packaged program
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "selftest-packaged"
+          $p = Start-Process -FilePath "dist\ch-autochart\ch-autochart.exe" -ArgumentList "--selftest", "`"$out`"" -Wait -PassThru
+          Get-Content (Join-Path $out "selftest.json") -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) {
+            Get-Content "$env:LOCALAPPDATA\ch-autochart\log.txt" -Tail 200 -ErrorAction SilentlyContinue
+            throw "packaged self-test failed ($($p.ExitCode))"
+          }
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME.TrimStart("v") } else { "0.0.0-dev" }
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc "/DAppVersion=$version" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          $size = (Get-Item dist\ch-autochart-setup.exe).Length / 1MB
+          "Installer: {0:N0} MB" -f $size | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+      - name: Install it silently and self-test the installed copy
+        shell: pwsh
+        run: |
+          $setup = Start-Process -FilePath "dist\ch-autochart-setup.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER" -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "setup exited with $($setup.ExitCode)" }
+          $exe = "$env:LOCALAPPDATA\Programs\ch-autochart\ch-autochart.exe"
+          if (-not (Test-Path $exe)) { throw "not installed at $exe" }
+          $out = Join-Path $env:RUNNER_TEMP "selftest-installed"
+          $env:TORCH_HOME = ""   # the installed copy must find its own bundled model
+          $p = Start-Process -FilePath $exe -ArgumentList "--selftest", "`"$out`"" -Wait -PassThru
+          $report = Get-Content (Join-Path $out "selftest.json") -Raw
+          $report
+          "## Installed program self-test`n``````json`n$report`n``````" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          if ($p.ExitCode -ne 0) {
+            Get-Content "$env:LOCALAPPDATA\ch-autochart\log.txt" -Tail 200 -ErrorAction SilentlyContinue
+            throw "installed self-test failed ($($p.ExitCode))"
+          }
+          $un = Start-Process -FilePath "$env:LOCALAPPDATA\Programs\ch-autochart\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES" -Wait -PassThru
+          "Uninstall exit code: $($un.ExitCode)"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ch-autochart-setup
+          path: dist/ch-autochart-setup.exe
+          retention-days: 30
+
+      - name: Attach to the release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ch-autochart-setup.exe
+          body_path: packaging/release-notes.md
+          name: ch-autochart ${{ github.ref_name }}

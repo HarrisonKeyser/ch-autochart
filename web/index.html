@@ -158,6 +158,10 @@
             <span>Give the charted part its own audio track<small>It drops out when you miss notes, like in the real games.</small></span></label>
           <label class="check" id="install-wrap" hidden><input type="checkbox" name="install">
             <span>Also put it in my Clone Hero songs folder<small id="install-path"></small></span></label>
+          <div class="songs-folder" id="songs-folder-pick" hidden>
+            <button class="btn small" type="button" id="choose-songs">Choose my Clone Hero Songs folder</button>
+            <small>So finished charts can go straight into the game. You only need to do this once.</small>
+          </div>
         </fieldset>
         <p class="form-error" id="details-error" role="alert"></p>
         <div class="actions">
@@ -178,10 +182,13 @@
         <h2 id="done-name"></h2>
         <p id="done-files"></p>
         <a class="btn primary" id="download" href="#" download>Download</a>
+        <button class="btn primary" type="button" id="save-zip" hidden>Save as .zip…</button>
+        <p class="saved-note" id="saved-note" hidden></p>
       </div>
     </div>
     <ol class="next-steps" id="next-steps"></ol>
     <div style="display:flex; gap:12px">
+      <button class="btn" type="button" id="show-installed" hidden>Show it in my Songs folder</button>
       <button class="btn" type="button" id="edit-again">Back to the studio</button>
       <button class="btn quiet" type="button" id="another">Chart another song</button>
     </div>

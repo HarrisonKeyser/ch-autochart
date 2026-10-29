@@ -235,12 +235,17 @@ fieldset legend { font-size: 13px; color: var(--muted); margin-bottom: 8px; padd
 .check small { display: block; color: var(--muted); }
 .actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 28px; grid-column: 1 / -1; align-items: center; }
 
+.songs-folder { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.songs-folder small { color: var(--muted); }
+
 /* ---------- done ---------- */
 #done { max-width: 720px; margin: 8vh auto 0; }
 .download-card { display: flex; gap: 22px; align-items: center; background: var(--panel); padding: 20px; border-radius: var(--radius-l); }
 .download-card img, .download-card .no-art { width: 96px; height: 96px; border-radius: 10px; object-fit: cover; flex: none; background: var(--raised); }
 .download-card h2 { margin: 0; font-stretch: 112%; font-size: 20px; overflow-wrap: anywhere; }
 .download-card p { margin: 2px 0 12px; color: var(--muted); }
+.saved-note { margin: 10px 0 0; color: var(--bone); font-size: 13px; overflow-wrap: anywhere; }
+.saved-note button { margin-left: 8px; }
 .next-steps { margin: 26px 0; padding-left: 20px; color: var(--muted); }
 .next-steps li { margin: 6px 0; }
 .next-steps code { color: var(--bone); background: var(--panel); padding: 1px 6px; border-radius: 4px; }

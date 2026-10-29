@@ -41,6 +41,9 @@ const S = {
 
 // ---------------------------------------------------------------- helpers
 
+// Inside the desktop program, window.pywebview.api talks to Python.
+const desktop = () => !!(window.pywebview && window.pywebview.api);
+
 function show(id) {
   for (const s of $$(".screen")) s.hidden = s.id !== id;
   window.scrollTo(0, 0);
@@ -988,10 +991,26 @@ function openDetails() {
     if (f.elements[k] && !f.elements[k].dataset.touched) f.elements[k].value = v || "";
   }
   $("#split-wrap").hidden = !S.project.separated;
-  $("#install-wrap").hidden = !S.project.songs_folder;
-  $("#install-path").textContent = S.project.songs_folder || "";
+  showSongsFolder(S.project.songs_folder);
   $("#details-error").textContent = "";
   show("details");
+}
+
+function showSongsFolder(folder) {
+  const had = !$("#install-wrap").hidden;
+  $("#install-wrap").hidden = !folder;
+  $("#install-path").textContent = folder || "";
+  $("#songs-folder-pick").hidden = !!folder || !desktop();
+  // In the desktop program, putting it straight into the game is the default.
+  if (folder && desktop() && !had) $("#details-form").elements.install.checked = true;
+}
+
+async function chooseSongsFolder() {
+  const res = await window.pywebview.api.choose_songs_folder();
+  if (res && res.path) {
+    S.project.songs_folder = res.path;
+    showSongsFolder(res.path);
+  }
 }
 
 function setArt(file) {
@@ -1022,6 +1041,25 @@ function initDetails() {
     if (f && f.type.startsWith("image/")) setArt(f);
   });
   $("#art-clear").addEventListener("click", () => setArt(null));
+  $("#choose-songs").addEventListener("click", chooseSongsFolder);
+  $("#save-zip").addEventListener("click", async () => {
+    const res = await window.pywebview.api.save_zip(S.jobId);
+    const note = $("#saved-note");
+    if (res && res.path) {
+      note.hidden = false;
+      note.textContent = `Saved to ${res.path}`;
+      const btn = document.createElement("button");
+      btn.className = "btn small";
+      btn.type = "button";
+      btn.textContent = "Show in folder";
+      btn.addEventListener("click", () => window.pywebview.api.show_in_folder(res.path));
+      note.append(btn);
+    } else if (res && res.error) {
+      note.hidden = false;
+      note.textContent = res.error;
+    }
+  });
+  $("#show-installed").addEventListener("click", () => window.pywebview.api.show_in_folder(S.installed));
   for (const el of $$("#details-form input[type=text]")) el.addEventListener("input", () => { el.dataset.touched = "1"; });
   $("#back-to-studio").addEventListener("click", () => show("studio"));
   $("#details-form").addEventListener("submit", buildChart);
@@ -1080,6 +1118,12 @@ function showDone(res, title, artist) {
   a.href = res.download;
   a.setAttribute("download", res.filename);
   a.textContent = `Download ${res.filename}`;
+  // The desktop program saves through a normal Save dialog instead of a download.
+  a.hidden = desktop();
+  $("#save-zip").hidden = !desktop();
+  $("#saved-note").hidden = true;
+  S.installed = res.installed;
+  $("#show-installed").hidden = !(desktop() && res.installed);
   const img = $("#done-art");
   img.hidden = !S.art;
   $("#done-no-art").hidden = !!S.art;
@@ -1092,7 +1136,8 @@ function showDone(res, title, artist) {
   steps.innerHTML = "";
   const items = res.installed
     ? ["Open Clone Hero.", "Go to Settings, then General, and choose Scan Songs.", "Find it in Quickplay."]
-    : ["Unzip the download.", "Move the folder inside it into your Clone Hero Songs folder.",
+    : [desktop() ? "Save the .zip and unzip it." : "Unzip the download.",
+       "Move the folder inside it into your Clone Hero Songs folder.",
        "In Clone Hero, go to Settings, then General, and choose Scan Songs."];
   for (const s of items) {
     const li = document.createElement("li");
