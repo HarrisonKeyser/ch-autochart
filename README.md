@@ -163,6 +163,11 @@ timings, pitches, chords and how long each note rings. Then, bar by bar:
   bass and vocals) can take over.
 - **In `smart` mode** it can also take over when the guitar is only holding a
   chord while another instrument plays something worth playing.
+- **If separation finds no clear guitar at all** (the song has none, or its
+  tone ended up in another track, which happens with synth leads and unusual
+  guitar sounds), every instrument is transcribed and the chart follows
+  whatever carries the song, starting with "other". The log and the studio
+  say when this happens.
 - **Switching costs something**, and it costs less where a new section starts,
   so the chart sticks with an instrument for whole passages instead of
   flickering between them. The whole song is planned at once (a Viterbi

@@ -39,7 +39,7 @@ def prepare_environment():
     a log file (a windowed program has no console to print to)."""
     models = os.path.join(BASE, "models")
     if os.path.isdir(models):
-        os.environ["TORCH_HOME"] = models
+        os.environ["CH_AUTOCHART_MODELS"] = models
     if FROZEN or sys.stdout is None:
         log = open(os.path.join(data_dir(), "log.txt"), "a", encoding="utf-8", buffering=1)
         log.write(f"\n--- started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
@@ -203,8 +203,9 @@ def selftest(out_dir):
         step("web files bundled", lambda: os.path.exists(os.path.join(BASE, "web", "index.html")))
         step("ffmpeg available", lambda: ac.ffmpeg_path())
         def model_files():
-            found = sorted(f for _, _, fs in os.walk(os.environ.get("TORCH_HOME", "")) for f in fs
-                           if f.endswith(".th"))
+            folder = os.environ.get("CH_AUTOCHART_MODELS", "")
+            found = sorted(f for f in (os.listdir(folder) if os.path.isdir(folder) else [])
+                           if f.endswith((".th", ".yaml")))
             # The installed program must work offline, so the model has to be inside it.
             assert found or not FROZEN, "the separation model isn't bundled"
             return found

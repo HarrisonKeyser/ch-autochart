@@ -865,6 +865,16 @@ def file_digest(path):
     return h.hexdigest()[:20]
 
 
+def bundled_models_folder(model_name):
+    """A folder holding the model offline (<name>.yaml + weights): the one the
+    Windows program ships with, or models/ next to this file."""
+    here = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    for folder in (os.environ.get("CH_AUTOCHART_MODELS"), os.path.join(here, "models")):
+        if folder and os.path.isfile(os.path.join(folder, f"{model_name}.yaml")):
+            return folder
+    return None
+
+
 def separate_demucs(path, y, sr, model_name, device, use_cache):
     """Split the mix into instruments with Demucs (htdemucs_6s: drums, bass,
     other, vocals, guitar, piano). Results are cached per song."""
@@ -888,9 +898,15 @@ def separate_demucs(path, y, sr, model_name, device, use_cache):
 
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    log(f"  loading the {model_name} separation model (downloaded once on first use)...")
+    offline = bundled_models_folder(model_name)
+    log(f"  loading the {model_name} separation model" +
+        ("..." if offline else " (downloaded once on first use)..."))
     try:
-        model = get_model(model_name)
+        if offline:
+            from pathlib import Path
+            model = get_model(model_name, repo=Path(offline))
+        else:
+            model = get_model(model_name)
     except Exception as err:
         raise SeparationUnavailable(f"couldn't load the {model_name} model: {err}")
     model.eval()

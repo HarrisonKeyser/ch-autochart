@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 150
     env:
       PYTHONIOENCODING: utf-8
-      TORCH_HOME: ${{ github.workspace }}\models
+      CH_AUTOCHART_MODELS: ${{ github.workspace }}\models
     steps:
       - uses: actions/checkout@v5
 
@@ -43,7 +43,7 @@ jobs:
           pip install pyinstaller pywebview imageio-ffmpeg mutagen
 
       - name: Download the separation model
-        run: python -c "from demucs.pretrained import get_model; m = get_model('htdemucs_6s'); print(m.sources)"
+        run: python packaging/fetch_model.py models htdemucs_6s
 
       - name: Chart a test band song with real separation
         shell: bash
@@ -61,7 +61,8 @@ jobs:
             for name in "Full mix" "Separated" "Smart fill"; do
               echo "### $name"; echo '```'; python check_guitar.py "../build/CI - $name" ../build/band.wav; echo '```'
             done
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/scores.md"
+          python ../.github/ci/annotate.py "$RUNNER_TEMP/scores.md" "Test band song scores (real separation)" notice
 
       - name: Chart real recordings (no answer key, just checks they work)
         shell: bash
@@ -72,10 +73,11 @@ jobs:
             for ex in fishin vibeace; do
               f=$(python -c "import librosa; print(librosa.ex('$ex', hq=True))")
               echo "### $ex"; echo '```'
-              python autochart.py "$f" --separate on -o build --force --title "$ex" --artist Example | tail -n 14
+              python autochart.py "$f" --separate on -o build --force --title "$ex" --artist Example | grep -E "tempo:|notes,|nearly empty|Expert|charted|bars|sections"
               echo '```'
             done
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/real.md"
+          python .github/ci/annotate.py "$RUNNER_TEMP/real.md" "Real recordings" notice
 
       - name: Package the program
         shell: bash
@@ -116,7 +118,7 @@ jobs:
           $exe = "$env:LOCALAPPDATA\Programs\ch-autochart\ch-autochart.exe"
           if (-not (Test-Path $exe)) { throw "not installed at $exe" }
           $out = Join-Path $env:RUNNER_TEMP "selftest-installed"
-          $env:TORCH_HOME = ""   # the installed copy must find its own bundled model
+          $env:CH_AUTOCHART_MODELS = ""   # the installed copy must use the model inside it
           $p = Start-Process -FilePath $exe -ArgumentList "--selftest", "`"$out`"" -Wait -PassThru
           $report = Get-Content (Join-Path $out "selftest.json") -Raw
           $report
