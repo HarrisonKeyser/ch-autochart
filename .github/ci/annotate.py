@@ -11,6 +11,8 @@ try:
         lines = fh.read().splitlines()
 except OSError:
     lines = [f"(no log at {path})"]
-tail = "\n".join(lines[-60:])[-6000:]
+# Progress bars are noise here; GitHub also cuts long annotations short.
+lines = [line for line in lines if "%|" not in line and line.strip()]
+tail = "\n".join(lines[-40:])[-3500:]
 esc = tail.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
 print(f"::error title={title}::{esc}", flush=True)
