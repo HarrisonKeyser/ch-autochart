@@ -959,7 +959,8 @@ def bar_index(times, tempo, pad, bar_ticks):
     return (tempo.time_to_tick(np.asarray(times) + pad) // bar_ticks).astype(int)
 
 
-def choose_sources(parts, primary, mode, tempo, pad, bar_ticks, n_bars, section_bars, frame_times):
+def choose_sources(parts, primary, mode, tempo, pad, bar_ticks, n_bars, section_bars, frame_times,
+                   weights=None):
     """Decide, bar by bar, which instrument the chart follows.
 
     The primary instrument (guitar) wins wherever it is really playing. Where
@@ -1003,7 +1004,7 @@ def choose_sources(parts, primary, mode, tempo, pad, bar_ticks, n_bars, section_
                 allowed = (mode == "smart" and p_idle) or not p_playing
                 busy = act[s][b] >= 2
                 fun = 0.5 * min(act[s][b], 8) + 0.15 * min(variety[s][b], 6)
-                score[i, b] = FILL_WEIGHT.get(s, 0.5) * fun if (allowed and busy) else -1.0
+                score[i, b] = (weights or FILL_WEIGHT).get(s, 0.5) * fun if (allowed and busy) else -1.0
 
     # Viterbi over bars: maximise score minus switching costs.
     k = len(names)
@@ -1406,25 +1407,50 @@ def prepare(args, candidates=None):
         names = candidates or [primary] + fillers
         names = [primary] + [x for x in names if x != primary and x in stems]
         log("Listening to each instrument")
-        for name in names:
+
+        def listen(name):
             mono = mono22(stems[name])
             if np.max(np.abs(mono)) < 1e-4:
-                continue
+                return
             log(f"  listening to the {LABEL[name]}...")
             pa = analyze(mono, "bass" if name == "bass" else "guitar", None, quiet=True)
             found = detect_notes(pa, args.density, args.all_onsets, mix=an, gate_db=args.gate_db, src=name)
             qn = quantize(found, tempo, pad, args.triplets)[0] if found else []
-            parts[name] = (qn, presence(pa, an, args.gate_db))
+            on = presence(pa, an, args.gate_db)
+            parts[name] = (qn, on)
+            log(f"    {len(qn)} notes, playing in {100 * on.mean():.0f}% of the song")
+
+        for name in names:
+            listen(name)
+        mode_fill, weights = args.fill, None
+        n_primary = len(parts.get(primary, ([],))[0])
+        if n_primary < max(8, 0.002 * an.duration * 60):
+            # Separation found (almost) nothing for the main instrument: the
+            # song may have none, or its tone landed in another track (synth
+            # leads, unusual guitar sounds). Chart whatever carries the song.
+            log(f"  The {LABEL[primary]} track came out nearly empty after separation, so the chart "
+                f"follows the other instruments instead.")
+            for name in [x for x in CHARTABLE if x in stems and x not in parts]:
+                listen(name)
+            fillers = [x for x in parts if x != primary]
+            mode_fill = "smart"
+            # A guitar Demucs didn't recognise most often lands in "other".
+            weights = dict(FILL_WEIGHT, other=1.0)
         if primary not in parts:
             parts[primary] = ([], np.zeros(len(an.times), bool))
         log("Planning the chart")
         pool = {k: v for k, v in parts.items() if k == primary or k in fillers}
-        recommended = choose_sources(pool, primary, args.fill if len(pool) > 1 else "off", tempo,
+        recommended = choose_sources(pool, primary, mode_fill if len(pool) > 1 else "off", tempo,
                                      pad, bar_ticks, n_bars, [t // bar_ticks for t, _ in sections],
-                                     an.times)
+                                     an.times, weights)
         # bars where the chosen instrument plays nothing are simply rests
         busy = {k: {n.tick // bar_ticks for n in v[0]} for k, v in parts.items()}
         recommended = [c if b in busy.get(c, ()) else None for b, c in enumerate(recommended)]
+        if not any(recommended):
+            log("  None of the separated instruments had clear notes; charting the full mix.")
+            parts, recommended = {}, None
+            found = detect_notes(an, args.density, args.all_onsets)
+            mix_notes = quantize(found, tempo, pad, args.triplets)[0] if found else []
     else:
         log("Listening to the mix")
         found = detect_notes(an, args.density, args.all_onsets)
@@ -1548,8 +1574,12 @@ def main(argv=None):
     log(f"  sections: {', '.join(n for _, n in proj.sections)}")
     if proj.parts:
         fills = describe_plan(proj, proj.recommended)
-        log(f"  charted from the {LABEL[proj.primary]}" +
-            (", with other instruments filling in where it rests:" if fills else " only"))
+        if proj.primary not in proj.recommended:
+            log("  charted from other instruments (the separation found no clear "
+                f"{LABEL[proj.primary]}):")
+        else:
+            log(f"  charted from the {LABEL[proj.primary]}" +
+                (", with other instruments filling in where it rests:" if fills else " only"))
         for line in fills:
             log(f"    {line}")
     else:

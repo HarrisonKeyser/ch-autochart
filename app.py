@@ -85,6 +85,8 @@ class Job:
         if "charting the full mix instead" in text:
             self.notice = ("Demucs isn't installed, so the song couldn't be split into instruments; "
                            "the chart follows the full mix. Install it with: pip install demucs")
+        elif "came out nearly empty after separation" in text:
+            self.notice = text.replace("track came", "part came").strip()
         elif text.startswith("Separation failed") or "couldn't load the" in text:
             self.notice = text
 
