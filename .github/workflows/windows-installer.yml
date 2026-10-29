@@ -142,6 +142,8 @@ jobs:
             python .github/ci/annotate.py "$env:RUNNER_TEMP\fail2.log" "Installed self-test failed"
             throw "installed self-test failed ($($p.ExitCode))"
           }
+          $report | Set-Content "$env:RUNNER_TEMP\installed.json"
+          python .github/ci/annotate.py "$env:RUNNER_TEMP\installed.json" "Installed program self-test" notice
           $un = Start-Process -FilePath "$env:LOCALAPPDATA\Programs\ch-autochart\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES" -Wait -PassThru
           "Uninstall exit code: $($un.ExitCode)"
 
