@@ -48,6 +48,8 @@ jobs:
       - name: Chart a test band song with real separation
         shell: bash
         run: |
+          trap 'c=$?; sleep 1; [ $c -eq 0 ] || python .github/ci/annotate.py "$RUNNER_TEMP/band.log" "Charting the test band song failed"' EXIT
+          exec > >(tee "$RUNNER_TEMP/band.log") 2>&1
           mkdir -p build
           python tests/make_band_song.py build/band.wav
           python autochart.py build/band.wav --separate off --artist CI --title "Full mix" -o build --force
@@ -76,7 +78,11 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Package the program
-        run: pyinstaller packaging/ch-autochart.spec --noconfirm --clean
+        shell: bash
+        run: |
+          trap 'c=$?; sleep 1; [ $c -eq 0 ] || python .github/ci/annotate.py "$RUNNER_TEMP/pyi.log" "Packaging failed"' EXIT
+          exec > >(tee "$RUNNER_TEMP/pyi.log") 2>&1
+          pyinstaller packaging/ch-autochart.spec --noconfirm --clean
 
       - name: Self-test the packaged program
         shell: pwsh
@@ -85,7 +91,9 @@ jobs:
           $p = Start-Process -FilePath "dist\ch-autochart\ch-autochart.exe" -ArgumentList "--selftest", "`"$out`"" -Wait -PassThru
           Get-Content (Join-Path $out "selftest.json") -ErrorAction SilentlyContinue
           if ($p.ExitCode -ne 0) {
-            Get-Content "$env:LOCALAPPDATA\ch-autochart\log.txt" -Tail 200 -ErrorAction SilentlyContinue
+            Copy-Item (Join-Path $out "selftest.json") "$env:RUNNER_TEMP\fail.log" -ErrorAction SilentlyContinue
+            Get-Content "$env:LOCALAPPDATA\ch-autochart\log.txt" -Tail 80 -ErrorAction SilentlyContinue | Add-Content "$env:RUNNER_TEMP\fail.log"
+            python .github/ci/annotate.py "$env:RUNNER_TEMP\fail.log" "Packaged self-test failed"
             throw "packaged self-test failed ($($p.ExitCode))"
           }
 
@@ -95,8 +103,8 @@ jobs:
           $version = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME.TrimStart("v") } else { "0.0.0-dev" }
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
-          & $iscc "/DAppVersion=$version" packaging\installer.iss
-          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          & $iscc "/DAppVersion=$version" packaging\installer.iss *> "$env:RUNNER_TEMP\iscc.log"
+          if ($LASTEXITCODE -ne 0) { python .github/ci/annotate.py "$env:RUNNER_TEMP\iscc.log" "Inno Setup failed"; throw "Inno Setup failed" }
           $size = (Get-Item dist\ch-autochart-setup.exe).Length / 1MB
           "Installer: {0:N0} MB" -f $size | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
 
@@ -114,7 +122,9 @@ jobs:
           $report
           "## Installed program self-test`n``````json`n$report`n``````" | Out-File -Append $env:GITHUB_STEP_SUMMARY
           if ($p.ExitCode -ne 0) {
-            Get-Content "$env:LOCALAPPDATA\ch-autochart\log.txt" -Tail 200 -ErrorAction SilentlyContinue
+            $report | Set-Content "$env:RUNNER_TEMP\fail2.log"
+            Get-Content "$env:LOCALAPPDATA\ch-autochart\log.txt" -Tail 80 -ErrorAction SilentlyContinue | Add-Content "$env:RUNNER_TEMP\fail2.log"
+            python .github/ci/annotate.py "$env:RUNNER_TEMP\fail2.log" "Installed self-test failed"
             throw "installed self-test failed ($($p.ExitCode))"
           }
           $un = Start-Process -FilePath "$env:LOCALAPPDATA\Programs\ch-autochart\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES" -Wait -PassThru
