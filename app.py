@@ -33,6 +33,7 @@ except ImportError:
     raise SystemExit("The studio needs Flask:  pip install -r requirements.txt")
 
 import autochart as ac
+import updates
 import librosa
 import soundfile as sf
 
@@ -416,6 +417,22 @@ def start_worker():
 @app.get("/api/settings")
 def get_settings():
     return jsonify(songs_folder=find_songs_folder(), version=ac.__version__)
+
+
+def update_checks_enabled():
+    """Only the installed program checks for updates (running from source, you
+    update with git). CH_AUTOCHART_UPDATE_CHECK=1/0 overrides either way."""
+    forced = os.environ.get("CH_AUTOCHART_UPDATE_CHECK")
+    if forced is not None:
+        return forced == "1"
+    return getattr(sys, "frozen", False) and load_settings().get("check_updates", True)
+
+
+@app.get("/api/update")
+def update_check():
+    if not update_checks_enabled():
+        return jsonify(available=False, current=ac.__version__, disabled=True)
+    return jsonify(updates.check(ac.__version__))
 
 
 def main():

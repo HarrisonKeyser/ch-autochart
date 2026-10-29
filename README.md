@@ -57,6 +57,20 @@ on GitHub, open **Releases → Draft a new release**, type a new tag such as
 `v2.0.1`, and click **Publish release**. About 40 minutes later the installer
 is attached to it, and the website's download button serves the new version.
 
+### Updates
+
+When the installed program opens, it asks GitHub whether a newer release
+exists (an anonymous request for the latest release; nothing about you or
+your songs is sent). If there is one, a bar at the top offers **Install
+update**: it downloads the new installer, closes the program, installs over
+the old version (keeping your settings, Songs folder and cached songs), and
+reopens it. A release only shows up once its installer has finished building.
+
+The version number comes from the release's tag at build time, so releasing
+`v2.0.1` produces a program that reports 2.0.1; there's nothing to edit by
+hand. Running from source never checks. To turn the check off, set
+`"check_updates": false` in `%LOCALAPPDATA%\ch-autochart\settings.json`.
+
 ## Install from source
 
 You need Python 3.9 or newer.

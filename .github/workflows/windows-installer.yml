@@ -45,6 +45,9 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller pywebview imageio-ffmpeg mutagen
 
+      - name: Test the update check
+        run: python tests/test_updates.py
+
       - name: Download the separation model
         run: python packaging/fetch_model.py models htdemucs_6s
 
@@ -81,6 +84,13 @@ jobs:
             done
           } | tee -a "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/real.md"
           python .github/ci/annotate.py "$RUNNER_TEMP/real.md" "Real recordings" notice
+
+      - name: Stamp the version from the release tag
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          sed -i -E "s/^__version__ = \".*\"/__version__ = \"${GITHUB_REF_NAME#v}\"/" autochart.py
+          grep -n "^__version__" autochart.py
 
       - name: Package the program
         shell: bash

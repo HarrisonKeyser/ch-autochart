@@ -40,6 +40,8 @@ def prepare_environment():
     models = os.path.join(BASE, "models")
     if os.path.isdir(models):
         os.environ["CH_AUTOCHART_MODELS"] = models
+    # Installers downloaded by an earlier in-app update are no longer needed.
+    shutil.rmtree(os.path.join(data_dir(), "updates"), ignore_errors=True)
     # librosa asks numba to cache compiled code on disk; inside the packaged
     # program that has to go somewhere writable.
     os.environ.setdefault("NUMBA_CACHE_DIR", os.path.join(data_dir(), "numba-cache"))
@@ -83,6 +85,7 @@ class DesktopApi:
 
     def __init__(self):
         self.window = None
+        self.download = None
 
     def save_zip(self, job_id):
         import webview
@@ -121,6 +124,34 @@ class DesktopApi:
         if url.startswith("https://"):
             webbrowser.open(url)
         return True
+
+    # ---- updates: download the new installer, run it, close ----
+
+    def install_update(self):
+        import autochart as ac
+        import updates
+        info = updates.check(ac.__version__)
+        if not info.get("available"):
+            return {"error": "No update is available right now."}
+        dest = os.path.join(data_dir(), "updates", f"ch-autochart-setup-{info['latest']}.exe")
+        if self.download is None or self.download.state == "error":
+            self.download = updates.Download(info["download"], dest, info.get("size"))
+        return {"started": True, "version": info["latest"]}
+
+    def update_status(self):
+        return self.download.status() if self.download else {"state": "idle"}
+
+    def run_installer(self):
+        """Start the downloaded installer and close this program so it can be
+        replaced. The installer reopens ch-autochart when it's done."""
+        if not self.download or self.download.state != "ready":
+            return {"error": "The update hasn't finished downloading."}
+        if os.name != "nt":
+            return {"error": "Updates install on Windows only."}
+        subprocess.Popen([self.download.dest, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                          "/CLOSEAPPLICATIONS", "/relaunch=1"], close_fds=True)
+        threading.Timer(1.5, lambda: os._exit(0)).start()
+        return {"ok": True}
 
 
 def run_window(url):
@@ -233,6 +264,14 @@ def selftest(out_dir):
             assert "ch-autochart studio" in html
             return port
         step("studio server", serve)
+
+        def update_check():
+            # Proves the packaged program can reach GitHub over HTTPS. Whether
+            # an update exists doesn't matter, and being offline isn't a failure.
+            import updates
+            r = updates.check(ac.__version__, force=True)
+            return {k: r.get(k) for k in ("available", "current", "latest", "error")}
+        step("update check", update_check)
         report["ok"] = True
     except BaseException:
         pass

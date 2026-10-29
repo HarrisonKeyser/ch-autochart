@@ -46,6 +46,14 @@ Name: "{autodesktop}\ch-autochart"; Filename: "{app}\ch-autochart.exe"; Tasks: d
 
 [Run]
 Filename: "{app}\ch-autochart.exe"; Description: "{cm:LaunchProgram,ch-autochart}"; Flags: nowait postinstall skipifsilent
+; After an in-app update (a silent install started with /relaunch=1), reopen the program.
+Filename: "{app}\ch-autochart.exe"; Flags: nowait; Check: RelaunchAfterUpdate
+
+[Code]
+function RelaunchAfterUpdate(): Boolean;
+begin
+  Result := WizardSilent() and (ExpandConstant('{param:relaunch|0}') = '1');
+end;
 
 [UninstallDelete]
 ; Settings, the log and the cache of separated songs.

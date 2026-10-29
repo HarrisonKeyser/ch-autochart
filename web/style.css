@@ -52,6 +52,21 @@ button, input, select { font: inherit; color: inherit; }
   color: var(--muted);
 }
 .wordmark svg { width: 22px; height: 22px; }
+.wordmark .version { font-stretch: 100%; font-weight: 400; font-size: 13px; color: var(--muted); opacity: .8; }
+
+/* ---------- update bar ---------- */
+.update-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px 20px; flex-wrap: wrap;
+  margin: 0 24px 14px; padding: 10px 12px 10px 18px;
+  border: 1px solid var(--brass); border-radius: var(--radius-l); background: var(--panel);
+}
+.update-bar p { margin: 0; }
+.update-bar strong { color: var(--brass-hi); }
+.update-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.update-link { color: var(--bone); font-size: 13px; }
+.update-meter { height: 6px; width: 160px; border-radius: 3px; background: var(--raised); overflow: hidden; display: inline-block; vertical-align: middle; margin-left: 10px; }
+.update-meter i { display: block; height: 100%; width: 0; background: var(--brass); transition: width .3s; }
+@media (max-width: 720px) { .update-bar { margin: 0 16px 14px; } }
 
 .screen { padding: 0 24px 40px; }
 

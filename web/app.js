@@ -1147,8 +1147,87 @@ function showDone(res, title, artist) {
   show("done");
 }
 
+// ---------------------------------------------------------------- updates
+
+// Wait (briefly) for the desktop program's bridge, which appears just after load.
+function desktopReady(timeout = 2500) {
+  if (desktop()) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const done = () => resolve(desktop());
+    window.addEventListener("pywebviewready", done, { once: true });
+    setTimeout(done, timeout);
+  });
+}
+
+async function initUpdates() {
+  try {
+    const st = await api("/api/settings");
+    if (st.version) $("#version").textContent = `version ${st.version}`;
+  } catch { /* not important */ }
+  await desktopReady();
+  let info;
+  try { info = await api("/api/update"); } catch { return; }
+  if (!info || !info.available) return;
+
+  const bar = $("#update-bar");
+  const text = $("#update-text");
+  text.innerHTML = "";
+  const strong = document.createElement("strong");
+  strong.textContent = `Version ${info.latest} is available.`;
+  text.append(strong, document.createTextNode(` You have ${info.current}.` +
+    (info.size ? ` The update is a ${Math.round(info.size / 1048576)} MB download.` : "")));
+  const notes = $("#update-notes");
+  notes.href = info.page || "#";
+  notes.addEventListener("click", (e) => {
+    if (desktop()) { e.preventDefault(); window.pywebview.api.open_link(info.page); }
+  });
+  $("#update-later").addEventListener("click", () => { bar.hidden = true; });
+  const install = $("#update-install");
+  if (!desktop()) {
+    install.hidden = true;   // in a browser, the release page has the installer
+    notes.textContent = "Get the new version";
+  }
+  install.addEventListener("click", () => installUpdate(info));
+  bar.hidden = false;
+}
+
+async function installUpdate(info) {
+  const busy = S.project && $("#done").hidden;
+  if (busy && !window.confirm("Installing the update closes ch-autochart, and the song you're working on will be lost. Install now?")) return;
+  const text = $("#update-text");
+  $("#update-install").hidden = true;
+  $("#update-later").hidden = true;
+  const res = await window.pywebview.api.install_update();
+  if (!res || res.error) {
+    text.textContent = (res && res.error) || "The update couldn't start.";
+    $("#update-install").hidden = false;
+    return;
+  }
+  text.innerHTML = `Downloading version ${info.latest}… <span class="update-meter"><i></i></span>`;
+  const poll = async () => {
+    const st = await window.pywebview.api.update_status();
+    if (st.state === "error") {
+      text.textContent = `The download failed: ${st.error}. Check your internet connection and try again.`;
+      $("#update-install").hidden = false;
+      $("#update-install").textContent = "Try again";
+      return;
+    }
+    if (st.state === "ready") {
+      text.textContent = "Installing the update. ch-autochart will close and reopen in a moment.";
+      const run = await window.pywebview.api.run_installer();
+      if (run && run.error) text.textContent = run.error;
+      return;
+    }
+    const meter = $(".update-meter i", text);
+    if (meter && st.fraction != null) meter.style.width = `${Math.round(st.fraction * 100)}%`;
+    setTimeout(poll, 400);
+  };
+  poll();
+}
+
 // ----------------------------------------------------------------
 
 initUpload();
 initStudio();
 initDetails();
+initUpdates();
