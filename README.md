@@ -231,8 +231,14 @@ lines land on the downbeat in every test. Generated folders pass
 [scan-chart](https://github.com/Geomitron/scan-chart) (the parser Chorus Encore
 uses to match Clone Hero) as playable with no chart issues.
 
-The tests use synthesized instruments with perfect stems; real separation is
-messier, which is what `--gate-db` and the studio's plan editor are for.
+The table uses perfect stems. With real Demucs separation (run on every
+Windows build), the synthesized plucked-string "guitar" isn't recognised as a
+guitar and mostly lands in Demucs's "other" track; the empty-guitar fallback
+then charts from "other", catching 91% of guitar notes, with more stray notes
+from the keys bleeding into "other" (64% precision). Real recordings separate
+better: on the two sample recordings the build charts, the guitar track carried
+the song, with the keys filling one passage. Real separation is messier than
+perfect stems, which is what `--gate-db` and the studio's plan editor are for.
 
 ## Limitations
 
