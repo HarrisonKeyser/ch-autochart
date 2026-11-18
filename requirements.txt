@@ -6,3 +6,4 @@ scikit-learn>=1.2
 Pillow>=9.0       # album art
 flask>=2.3        # the studio web app (app.py)
 demucs>=4.0       # splits songs into instruments so only the guitar is charted (pulls in PyTorch)
+onnxruntime>=1.16  # runs Basic Pitch, the note-transcription model (models/basic_pitch)

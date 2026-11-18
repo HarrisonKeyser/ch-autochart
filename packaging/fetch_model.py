@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Download the Demucs separation model into models/ so it can be shipped
-inside the Windows program and loaded offline.
+"""Download the models into models/ so they can be shipped inside the
+Windows program and loaded offline.
 
     python packaging/fetch_model.py [models_folder] [model_name]
 
-The folder ends up with the model's recipe (<name>.yaml) and its weights
-(<signature>-<checksum>.th), which is the layout Demucs reads with
-get_model(name, repo=folder). The checksum is verified.
+1. Demucs (separation): the folder gets the model's recipe (<name>.yaml) and
+   its weights (<signature>-<checksum>.th), the layout Demucs reads with
+   get_model(name, repo=folder).
+2. Basic Pitch (note transcription, Spotify, Apache License 2.0): the 230 KB
+   ONNX model plus its LICENSE and NOTICE, in <folder>/basic_pitch/.
+Checksums are verified for both.
 """
 import hashlib
 import os
@@ -45,6 +48,29 @@ def main():
 
     model = dp.get_model(name, repo=folder)   # proves it loads from the folder alone
     print("loads offline:", type(model).__name__, model.sources)
+    fetch_basic_pitch(folder / "basic_pitch")
+
+
+BASIC_PITCH = "https://raw.githubusercontent.com/spotify/basic-pitch/v0.4.0/"
+BASIC_PITCH_SHA256 = "2c3c1d144bfa61ad236e92e169c13535c880469a12a047d4e73451f2c059a0ec"
+
+
+def fetch_basic_pitch(folder):
+    folder.mkdir(parents=True, exist_ok=True)
+    for src, name in [("basic_pitch/saved_models/icassp_2022/nmp.onnx", "nmp.onnx"),
+                      ("LICENSE", "LICENSE"), ("NOTICE", "NOTICE")]:
+        target = folder / name
+        if not target.exists():
+            print(f"downloading {BASIC_PITCH + src}")
+            with urllib.request.urlopen(BASIC_PITCH + src) as resp:
+                target.write_bytes(resp.read())
+    digest = hashlib.sha256((folder / "nmp.onnx").read_bytes()).hexdigest()
+    if digest != BASIC_PITCH_SHA256:
+        (folder / "nmp.onnx").unlink()
+        sys.exit("checksum mismatch for Basic Pitch's nmp.onnx")
+    import onnxruntime as ort
+    sess = ort.InferenceSession(str(folder / "nmp.onnx"), providers=["CPUExecutionProvider"])
+    print("ok  basic_pitch/nmp.onnx, inputs:", [i.name for i in sess.get_inputs()])
 
 
 if __name__ == "__main__":

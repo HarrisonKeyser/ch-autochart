@@ -1,7 +1,7 @@
 # PyInstaller recipe for the Windows program.
 # Builds dist/ch-autochart/ (ch-autochart.exe plus everything it needs).
 # Run from the repository root:   pyinstaller packaging/ch-autochart.spec --noconfirm
-# The separation model must already be in models/ (the GitHub workflow downloads it).
+# The models must already be in models/ (packaging/fetch_model.py downloads them).
 import os
 
 from PyInstaller.utils.hooks import collect_all
@@ -14,13 +14,13 @@ datas = [
     (os.path.join(ROOT, "packaging", "icon.ico"), "packaging"),
 ]
 binaries = []
-hiddenimports = ["app", "autochart", "desktop"]
+hiddenimports = ["app", "autochart", "desktop", "transcriber"]
 
 # Packages that load data files or plugins at run time, which PyInstaller
 # can't discover by reading imports alone.
 for pkg in ["demucs", "librosa", "imageio_ffmpeg", "soundfile", "_soundfile_data", "soxr",
             "webview", "julius", "openunmix", "mutagen", "sklearn", "scipy", "numba", "llvmlite",
-            "lazy_loader", "audioread", "pooch", "flask", "werkzeug", "jinja2"]:
+            "lazy_loader", "audioread", "pooch", "flask", "werkzeug", "jinja2", "onnxruntime"]:
     try:
         d, b, h = collect_all(pkg)
     except Exception:

@@ -15,14 +15,19 @@ Writes <out>/<Artist - Title>/ containing:
 
 How it works, in short:
   1. The song is split into instruments with Demucs (when installed), and
-     each one is transcribed on its own.
+     each one is transcribed on its own: attacks from its onset envelope,
+     notes and chords from Basic Pitch (transcriber.py), with anything that
+     is only another instrument bleeding into the stem left out.
   2. Bar by bar, the chart follows the guitar wherever it really plays, and
      hands the part to another instrument (keys, synth, harmonica...) where
-     the guitar sits out, sticking with a choice for whole passages.
-  3. Beat tracking -> a tempo map (constant, or following the band's drift).
+     the guitar sits out, sticking with a choice for whole passages. Bars
+     where the guitar is buried borrow a clearer repeat's pattern.
+  3. The whole song's attacks -> a tempo map (constant, or following the
+     band's drift).
   4. Onsets -> note timings on a 1/16 grid; pitch movement -> frets that
-     follow the melody's contour; heard polyphony -> chords; ring time ->
-     sustains. Lower difficulties are thinned-out subsets of Expert.
+     follow the melody's contour; struck notes -> chords (one shape per
+     repeated chord); ring time -> sustains. Lower difficulties are
+     thinned-out subsets of Expert.
   5. Repetition in the harmony -> section names; star power every few bars.
 
 app.py runs the same engine as a local web app with a visual editor.
@@ -41,10 +46,12 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
+import transcriber
+
 try:
     import librosa
     import soundfile as sf
-    from scipy.ndimage import maximum_filter1d
+    from scipy.ndimage import maximum_filter1d, median_filter
 except ImportError as err:  # pragma: no cover
     sys.exit(f"Missing dependency ({err.name}). Install with:  pip install -r requirements.txt")
 
@@ -64,7 +71,7 @@ FINE_LATENCY = 0.004 # the fine envelope peaks ~4 ms after a real attack
 # in an isolated instrument (largest chord, and room needed around it in ticks).
 DIFFICULTIES = {
     "expert": dict(lanes=5, gap_beats=0.25, gap_sec=0.075, keep=1.00, chord=0.12, triple=0.03,
-                   max_chord=3, chord_gap=96),
+                   max_chord=3, chord_gap=48),
     "hard":   dict(lanes=5, gap_beats=0.50, gap_sec=0.150, keep=0.70, chord=0.07, triple=0.00,
                    max_chord=2, chord_gap=96),
     "medium": dict(lanes=4, gap_beats=0.50, gap_sec=0.240, keep=0.45, chord=0.03, triple=0.00,
@@ -207,6 +214,7 @@ class Analysis:
     times: np.ndarray        # frame times
     env: np.ndarray          # onset strength, full band
     note_env: np.ndarray     # onset strength used for picking notes (full + harmonic)
+    flux: np.ndarray         # SuperFlux attack envelope (used for isolated instruments)
     fine_times: np.ndarray
     fine_env: np.ndarray     # high-resolution onset strength for timing refinement
     env_low: np.ndarray      # onset strength, low band (kick/bass) for downbeats
@@ -238,6 +246,9 @@ def analyze(y, instrument, bpm_hint, quiet=False):
         start_bpm=bpm_hint or 120.0, units="time", trim=False)
     tempo = float(np.atleast_1d(tempo)[0])
     fine_env = librosa.onset.onset_strength(y=y, sr=SR, hop_length=FINE_HOP, n_fft=512, n_mels=64)
+    # SuperFlux: compares with 2 frames back and max-filters across frequency,
+    # so vibrato and sustained chords don't look like new attacks.
+    flux = librosa.onset.onset_strength(y=y, sr=SR, hop_length=HOP, lag=2, max_size=3)
     fine_times = librosa.frames_to_time(np.arange(len(fine_env)), sr=SR, hop_length=FINE_HOP)
 
     say("  pitch analysis...")
@@ -252,9 +263,9 @@ def analyze(y, instrument, bpm_hint, quiet=False):
     mfcc = librosa.feature.mfcc(y=y, sr=SR, hop_length=HOP, n_mfcc=13)
     rms = librosa.feature.rms(y=y, hop_length=HOP)[0]
 
-    n = min(len(note_env), len(env_low), Cw.shape[1], chroma.shape[1], mfcc.shape[1], len(rms))
+    n = min(len(note_env), len(flux), len(env_low), Cw.shape[1], chroma.shape[1], mfcc.shape[1], len(rms))
     times = librosa.frames_to_time(np.arange(n), sr=SR, hop_length=HOP)
-    an = Analysis(duration=len(y) / SR, times=times, env=env[:n], note_env=note_env[:n], env_low=env_low[:n],
+    an = Analysis(duration=len(y) / SR, times=times, env=env[:n], note_env=note_env[:n], flux=flux[:n], env_low=env_low[:n],
                     fine_times=fine_times, fine_env=fine_env, Cdb=Cdb[:, :n], Cw=Cw[:, :n], chroma=chroma[:, :n], mfcc=mfcc[:, :n], rms=rms[:n],
                     beats=np.asarray(beats, float), tempo_guess=tempo)
     # The coarse envelope (and so the beat tracker) runs 15-25 ms late; re-time
@@ -443,6 +454,90 @@ def segment_tempo(T, tol):
     return events
 
 
+def _fold_peak(times, weights, period, smooth=0.006):
+    """Fold onset energy at `period` and return (phase, sharpness): where in
+    the cycle the attacks pile up, and how strongly (peak / average)."""
+    nb = max(16, int(round(period / 0.002)))
+    idx = ((times % period) / period * nb).astype(int) % nb
+    hist = np.bincount(idx, weights=weights, minlength=nb).astype(float)
+    k = max(1, int(round(smooth / period * nb)))
+    kern = np.exp(-0.5 * (np.arange(-3 * k, 3 * k + 1) / k) ** 2)
+    hist = np.convolve(np.concatenate([hist[-3 * k:], hist, hist[:3 * k]]), kern, "same")[3 * k:-3 * k]
+    j = int(np.argmax(hist))
+    return (j + 0.5) / nb * period, float(hist[j] / (hist.mean() + 1e-12))
+
+
+def _attack_weights(an):
+    """Fine-resolution attack strength, emphasising clear peaks."""
+    fe = an.fine_env / (np.percentile(an.fine_env, 99) + 1e-9)
+    peak = (fe == maximum_filter1d(fe, size=5)) & (fe > 0.05)
+    t = an.fine_times[peak] - FINE_LATENCY
+    return t, np.clip(fe[peak], 0, 2) ** 2
+
+
+def _beat_or_offbeat(an, beats, period):
+    """Kick drums and bass hits land on the beat; off-beat strums, skanks and
+    hi-hats don't. True if `beats` is the better choice than beats + half."""
+    def score(ts):
+        fr = np.clip(librosa.time_to_frames(ts, sr=SR, hop_length=HOP), 0, len(an.env_low) - 3)
+        return float(np.mean(np.maximum.reduce([an.env_low[fr], an.env_low[fr + 1], an.env_low[fr + 2]])))
+    inside = beats[(beats > 0) & (beats < an.duration - period)]
+    if len(inside) < 8:
+        return True
+    return score(inside) >= score(inside + period / 2)
+
+
+def fit_beat_grid(an, period_hint=None, anchor=None, window_beats=16, tol=0.025):
+    """A beat grid fitted to the attacks of the whole song.
+
+    Beat trackers often lock onto the off-beat for a while and then jump back
+    (songs with strong off-beat strums or skanks), and treating each jump as a
+    tempo change makes a wildly wobbling tempo map. Folding all the attacks at
+    the half-beat finds the tempo every part of the song agrees on regardless
+    of which half the tracker followed; the kick drum then says which half is
+    the beat. Returns (beat_times, period, steady); when the tempo isn't
+    steady, only `steady` matters (the caller follows the tracked beats)."""
+    t, w = _attack_weights(an)
+    beats = an.beats
+    if period_hint:
+        p0 = period_hint
+    else:
+        d = np.diff(beats)
+        med = float(np.median(d))
+        d = d[(d > 0.8 * med) & (d < 1.25 * med)]
+        p0 = float(np.median(d)) if len(d) else med
+    if len(t) < 32:
+        return None
+    # 1. The tempo: the period at which half-beat-folded attacks line up best.
+    rel = 0.0 if period_hint else 0.008
+    cands = p0 * (1 + np.linspace(-rel, rel, 1 if period_hint else 321))
+    sharp = [_fold_peak(t, w, P / 2)[1] for P in cands]
+    P = float(cands[int(np.argmax(sharp))])
+    phi, _ = _fold_peak(t, w, P / 2)
+    if anchor is not None:
+        phi = anchor % (P / 2)
+    # 2. Is one tempo right everywhere? Check each stretch's own alignment.
+    Q = P / 2
+    span = window_beats * P
+    offsets, starts = [], np.arange(0, an.duration - span / 2, span / 2)
+    for a in starts:
+        m = (t >= a) & (t < a + span)
+        if m.sum() < window_beats:
+            offsets.append(np.nan)
+            continue
+        ph, sh = _fold_peak(t[m], w[m], Q)
+        offsets.append(((ph - phi + Q / 2) % Q) - Q / 2 if sh > 2.0 else np.nan)
+    offsets = np.array(offsets)
+    known = offsets[~np.isnan(offsets)]
+    steady = len(known) == 0 or np.mean(np.abs(known) < tol) >= 0.8
+    # 3. The grid, then which half of it is the beat.
+    k0 = math.floor((0 - phi) / P) - 1
+    grid = phi + P * np.arange(k0, k0 + int(an.duration / P) + 4)
+    if anchor is None and not _beat_or_offbeat(an, grid, P):
+        grid = grid + P / 2
+    return grid, P, steady
+
+
 def build_tempo(an, args):
     """Returns (TempoMap, pad_seconds, mode, bpm_summary).
 
@@ -457,9 +552,14 @@ def build_tempo(an, args):
         beats = np.arange(0, an.duration, p) + (args.first_downbeat or 0.0)
     period = 60.0 / args.bpm if args.bpm else None
 
-    t0, p, resid = fit_constant(beats, period, args.first_downbeat)
-    # Steady if most beats sit on one constant grid (a few tracker slips are fine).
-    steady = np.mean(resid < min(0.035, 0.08 * p)) >= 0.75
+    fitted = fit_beat_grid(an, period, args.first_downbeat) if len(an.beats) >= 8 else None
+    if fitted is not None:
+        fgrid, p, steady = fitted
+        t0 = float(fgrid[0])
+    else:
+        t0, p, resid = fit_constant(beats, period, args.first_downbeat)
+        # Steady if most beats sit on one constant grid (a few tracker slips are fine).
+        steady = np.mean(resid < min(0.035, 0.08 * p)) >= 0.75
     mode = args.tempo_map
     if args.bpm:
         mode = "constant"
@@ -556,19 +656,217 @@ def find_pitches(rise, level=None, max_voices=3):
     return f0s
 
 
-def detect_notes(an, density, keep_unpitched=False, mix=None, gate_db=30.0, src="mix"):
+# MIDI range each instrument can play (pitches outside it in a separated
+# track are bleed from other instruments).
+MIDI_RANGE = {"guitar": (40, 88), "bass": (28, 67), "piano": (21, 108), "other": (28, 100),
+              "vocals": (40, 84), "mix": (28, 96)}
+STEM_THRESHOLD = 0.2      # how far above the surrounding level a strum must rise
+
+
+def pick_onsets(e, theta, pre=0.03, post=0.03, gap=0.05, base_win=0.6, scale_win=3.0):
+    """Attacks in an isolated instrument: peaks that rise `theta` of the way
+    from the local floor (median over 0.6 s) to the local loudest attack
+    (over 3 s). Judging against the playing around each attack keeps soft
+    strums between loud ones, and quiet passages, without picking up noise.
+    Returns (frames, strength 0..1)."""
+    fps = SR / HOP
+    # Compress first, so one huge attack (say, after a rest) doesn't make the
+    # ordinary strums around it look small.
+    is_max = np.r_[False, (e[1:-1] >= e[:-2]) & (e[1:-1] >= e[2:]), False]
+    peaks = e[is_max & (e >= 0.1 * e.max())]        # real attacks, not the wiggles between
+    if len(peaks):    # ref: a tenth of a typical attack, so tiny wiggles stay tiny
+        e = np.log1p(e / (0.1 * np.median(peaks) + 1e-9))
+    base = median_filter(e, size=int(base_win * fps) | 1)
+    top = maximum_filter1d(e, size=int(scale_win * fps) | 1)
+    z = (e - base) / np.maximum(top - base, 1e-6 + 0.05 * np.percentile(e, 99))
+    is_peak = maximum_filter1d(z, size=int((pre + post) * fps) | 1) == z
+    out = []
+    for f in np.where(is_peak & (z > theta))[0]:
+        if out and f - out[-1] < gap * fps:
+            if z[f] > z[out[-1]]:
+                out[-1] = f
+            continue
+        out.append(f)
+    out = np.array(out, int)
+    return out, np.clip(z[out], 0, 1) if len(out) else np.zeros(0)
+
+
+OVERTONES = {12, 19, 24, 28, 31, 34, 36}   # semitones from a note to its 2nd..8th harmonics
+
+
+def struck_keys(bp, f, nxt, in_range):
+    """Which keys a strum at frame f plays, from Basic Pitch's estimates:
+    keys that start here (the model hears an onset, or they get clearly
+    louder) rather than ones still ringing from before, minus overtones of
+    lower notes. Returns (keys ascending, whether anything was newly struck)
+    or None when nothing clear is sounding."""
+    n = len(bp["note"])
+    a, b = f + 1, min(f + 9, max(f + 2, nxt), n)
+    if a >= b:
+        return None
+    after = bp["note"][a:b].max(axis=0) * in_range
+    before = bp["note"][max(0, f - 3):max(1, f)].max(axis=0)
+    onset = bp["onset"][max(0, f - 1):min(f + 4, n)].max(axis=0) * in_range
+    fresh = (before < 0.3) & ((onset >= 0.3) | (after - before >= 0.2))
+    again = (before >= 0.3) & (onset >= 0.5) & (after > before)   # struck again while ringing
+    score = np.where(fresh | again, after, 0.0)
+    struck = score.max() >= 0.2
+    if not struck:
+        score = after             # a re-strum of notes already ringing?
+    peak = score.max()
+    if peak < 0.2:
+        return None
+    keep = []
+    for k in np.where(score >= max(min(0.3, peak), 0.5 * peak))[0]:
+        if not any((k - r) in OVERTONES and score[k] <= score[r] + 0.1 for r in keep):
+            keep.append(int(k))
+    return np.array(keep), struck
+
+
+def detect_stem_notes(an, density, mix, gate_db, src, bp=None, instrument="guitar", own=None):
+    """Notes in an isolated instrument (a separated stem).
+
+    When: attack peaks in the stem (pick_onsets). Which: Basic Pitch's
+    estimate of the keys sounding just after each attack, limited to the
+    instrument's range; the lowest is the root, and several at once make a
+    chord. How long: until the root stops sounding. Without the model, the
+    constant-Q analysis below stands in."""
+    frames, strength = pick_onsets(an.flux, STEM_THRESHOLD / max(density, 0.05))
+    frames = frames[frames < len(an.times)]
+    strength = strength[:len(frames)]
+    if len(frames) == 0:
+        return []
+    coarse = an.times[frames]
+    times, found = refine_times(an, coarse, before=0.04, after=0.03)
+    if found.any():   # attacks without a clear fine peak get the typical correction
+        times = np.where(found, times, coarse + np.median(times[found] - coarse[found]))
+    audible = presence(an, mix, gate_db, own)
+    lo, hi = MIDI_RANGE.get(instrument, MIDI_RANGE["mix"])
+    keys = np.arange(88) + transcriber.LOWEST_MIDI
+    in_range = (keys >= lo) & (keys <= hi)
+    fmin_midi = 28 if instrument == "bass" else 40      # CQT bin 0 (keeps pitch units consistent)
+    nf = an.Cdb.shape[1]
+    notes, sounds = [], []
+    for i, f in enumerate(frames):
+        if not audible[min(f + 2, len(audible) - 1)]:
+            continue                    # only bleed from other instruments here
+        if own is not None and not is_own_attack(own, f):
+            continue                    # another instrument's attack, leaking in
+        nxt = frames[i + 1] if i + 1 < len(frames) else nf
+        pitch = poly = end_f = sound = None
+        if bp is not None:
+            # the model's frames line up with the attack itself, which the
+            # onset envelope reports a few frames late
+            fb = min(int(round(times[i] / FRAME_SEC)), f)
+            # A wide strum (six strings, ~50 ms) can peak in the onset envelope
+            # at its end; the model marks where it starts. Move there, but never
+            # back onto the previous attack.
+            lo = max(fb - 7, int(notes[-1].time / FRAME_SEC) + 4 if notes else 0, 0)
+            curve = (bp["onset"][lo:fb + 3] * in_range).max(axis=1) if lo < fb + 3 else []
+            if len(curve) and curve.max() >= 0.5 and lo + int(np.argmax(curve)) < fb - 2:
+                fb = lo + int(np.argmax(curve))
+                times[i] = fb * FRAME_SEC
+            heard = struck_keys(bp, fb, nxt - (f - fb), in_range)
+            if heard is not None and not heard[1] and strength[i] < 0.35:
+                continue                # a soft bump with no new note: not an attack
+            if heard is not None:
+                on = heard[0]
+                root = int(on[0])
+                pitch = float(keys[root] - fmin_midi)
+                poly = min(len({int(k) % 12 for k in on}), 3)
+                ring = bp["note"][fb:min(fb + int(8.0 / FRAME_SEC), len(bp["note"])), root]
+                quiet = np.where(ring < 0.25)[0]
+                quiet = quiet[quiet >= 3]
+                end_f = fb + (int(quiet[0]) if len(quiet) else len(ring))
+                span = bp["note"][fb + 1:max(fb + 2, min(fb + int(0.5 / FRAME_SEC), nxt - (f - fb)))]
+                sound = span.mean(axis=0) * in_range
+        if pitch is None:               # no model, or it heard nothing clear: constant-Q
+            a = min(f + 1, nf - 1)
+            b = max(a + 1, min(f + 5, nxt, nf))
+            after = an.Cdb[:, a:b].mean(axis=1)
+            before = an.Cdb[:, max(0, f - 4):max(1, f - 1)].mean(axis=1)
+            rise = np.clip(after - before, 0, None)
+            if rise.max() < 4.0:
+                rise = np.clip(an.Cw[:, a:b].mean(axis=1), 0, None)
+            f0s = find_pitches(rise, after)
+            pitch, poly = float(min(f0s)), len(f0s)
+            track = an.Cdb[max(0, f0s[0] - 1):f0s[0] + 2, f:min(nf, f + int(8.0 / FRAME_SEC))].max(axis=0)
+            gone = np.where(track < track[:6].max() - 8.0)[0]
+            gone = gone[gone >= 3]
+            end_f = f + (int(gone[0]) if len(gone) else len(track))
+        notes.append(Note(time=float(times[i]), strength=float(strength[i]), pitch=pitch,
+                          end_time=float(end_f * FRAME_SEC), poly=poly, src=src))
+        sounds.append(sound)
+    steady_chords(notes, sounds, keys - fmin_midi)
+    return notes
+
+
+def steady_chords(notes, sounds, pitches, sim=0.9, max_gap=1.2):
+    """Strums of one chord, repeated, get one pitch and one chord size.
+
+    A human charter hears "the same chord again" and repeats one shape; the
+    model's note-by-note estimates wobble (a bass string missed here, an
+    overtone there). Consecutive strums that sound alike (pitch-class
+    profile of what rings after them) are grouped, and each group takes the
+    bass note and size heard across all of it. Single-note lines are left
+    alone: a note joins a group of chords only if it is a chord too, has the
+    group's bass note, or is a lone slip between two of the group's chords."""
+    def profile(v):
+        c = np.zeros(12)
+        v = np.where(v >= 0.3 * v.max(), v, 0.0)       # the notes, not the model's faint haze
+        np.add.at(c, np.round(pitches).astype(int) % 12, v)
+        return c / (np.linalg.norm(c) + 1e-9)
+
+    prof = [profile(s) if s is not None else None for s in sounds]
+
+    def fits(i, run, root):
+        if prof[i] is None or notes[i].time - notes[run[-1]].time > max_gap:
+            return False
+        recent = sum(prof[k] for k in run[-2:])        # compare with the last strums,
+        if float(prof[i] @ recent) / (np.linalg.norm(recent) + 1e-9) < sim:   # so a change shows
+            return False
+        n = notes[i]
+        return n.poly >= 2 or abs(n.pitch - root) < 0.5
+
+    def settle(run):
+        chords = [notes[k].poly for k in run if notes[k].poly >= 2]
+        if len(run) < 2 or len(chords) * 2 < len(run):
+            return
+        total = sum(sounds[k] for k in run)
+        keep = []
+        for k in np.where(total >= 0.35 * total.max())[0]:
+            if not any((k - r) in OVERTONES and total[k] <= 1.2 * total[r] for r in keep):
+                keep.append(int(k))
+        size = int(np.median(chords) + 0.5)
+        for k in run:
+            notes[k].pitch = float(pitches[keep[0]])
+            notes[k].poly = size
+
+    run, root = [], None
+    for i in range(len(notes)):
+        if run and (fits(i, run, root) or (notes[run[-1]].poly >= 2 and i + 1 < len(notes)
+                                           and prof[i] is not None and fits(i + 1, run, root))):
+            run.append(i)
+            continue
+        if run:
+            settle(run)
+        run = [i] if prof[i] is not None else []
+        root = notes[i].pitch
+    if run:
+        settle(run)
+
+
+def detect_notes(an, density, keep_unpitched=False, mix=None, gate_db=45.0, src="mix",
+                 bp=None, instrument="guitar", own=None):
     """Find the notes in one audio track.
 
     When `an` is an isolated instrument (a stem) pass the full mix's analysis
-    as `mix`: notes are then only kept where that instrument is actually
-    audible, not where only faint bleed from other instruments remains."""
-    env = an.note_env
+    as `mix` (and the stem's Basic Pitch estimates as `bp`, its bleed-free
+    energy as `own`): see detect_stem_notes. Otherwise `an` is a full mix and
+    the notes come from its onsets and constant-Q spectrum."""
     if mix is not None:
-        # An isolated instrument: judge each attack against the playing around
-        # it (3 s), not the loudest moment of the song. Distorted guitar is so
-        # compressed that chord changes barely stand out globally.
-        ref = maximum_filter1d(env, size=int(3.0 / FRAME_SEC))
-        env = env / np.maximum(ref, 0.1 * np.percentile(env, 99) + 1e-9)
+        return detect_stem_notes(an, density, mix, gate_db, src, bp, instrument, own)
+    env = an.note_env
     wait = max(1, int(round(0.06 / FRAME_SEC)))
     frames = librosa.onset.onset_detect(
         onset_envelope=env, sr=SR, hop_length=HOP, units="frames",
@@ -585,17 +883,11 @@ def detect_notes(an, density, keep_unpitched=False, mix=None, gate_db=30.0, src=
     # No sharp attack nearby = a smeared echo of an earlier note, not a new one.
     frames, times, strength = frames[found], times[found], strength[found]
 
-    audible = None
-    if mix is not None:
-        audible = presence(an, mix, gate_db)
-
     Cdb, Cw = an.Cdb, an.Cw
     nb, nf = Cw.shape
     max_ring = int(8.0 / FRAME_SEC)
     notes = []
     for i, f in enumerate(frames):
-        if audible is not None and not audible[min(f + 2, len(audible) - 1)]:
-            continue                    # only bleed from other instruments here
         nxt = frames[i + 1] if i + 1 < len(frames) else nf
         a = min(f + 1, nf - 1)
         b = max(a + 1, min(f + 5, nxt, nf))
@@ -607,9 +899,7 @@ def detect_notes(an, density, keep_unpitched=False, mix=None, gate_db=30.0, src=
         if not pitched:                 # e.g. a re-struck sustained note: use what stands out
             rise = np.clip(Cw[:, a:b].mean(axis=1), 0, None)
         sal = salience(rise)
-        # Octave correction needs a clean spectrum: only for isolated instruments.
-        level = after if mix is not None else None
-        f0s = find_pitches(rise, level) if pitched else [best_pitch(sal, level)]
+        f0s = find_pitches(rise) if pitched else [best_pitch(sal)]
         pk = f0s[0]
         # Sub-bin refinement for a smoother contour.
         if 0 < pk < nb - 1:
@@ -618,8 +908,6 @@ def detect_notes(an, density, keep_unpitched=False, mix=None, gate_db=30.0, src=
             pitch = pk + (0.5 * (l - r) / den if den < 0 else 0.0)
         else:
             pitch = float(pk)
-        if len(f0s) > 1 and mix is not None:
-            pitch = float(min(f0s))     # chords follow their lowest note (the root)
 
         # Ring time: follow that pitch until it drops 8 dB below its attack.
         track = Cdb[max(0, pk - 1):pk + 2, f:min(nf, f + max_ring)].max(axis=0)
@@ -627,9 +915,8 @@ def detect_notes(an, density, keep_unpitched=False, mix=None, gate_db=30.0, src=
         gone = np.where(track < attack - 8.0)[0]
         gone = gone[gone >= 3]
         end_f = f + (int(gone[0]) if len(gone) else len(track))
-        # Unpitched attacks: drum hits in a mix, but in an isolated instrument
-        # they're re-struck chords and muted strums, so keep the clear ones.
-        if not (pitched or keep_unpitched or strength[i] >= (0.35 if mix is not None else 0.7)):
+        # Unpitched attacks in a full mix are mostly drum hits.
+        if not (pitched or keep_unpitched or strength[i] >= 0.7):
             continue                    # drums only: not something a guitarist plays
         notes.append(Note(time=float(times[i]), strength=float(strength[i]),
                           pitch=float(pitch), end_time=float(end_f * FRAME_SEC),
@@ -637,16 +924,70 @@ def detect_notes(an, density, keep_unpitched=False, mix=None, gate_db=30.0, src=
     return notes
 
 
-def presence(part, mix, gate_db):
-    """Per frame: is this isolated instrument really playing? It must be within
-    `gate_db` of its own loud passages and not buried far below the mix
-    (separated stems always carry some quiet bleed from everything else)."""
-    n = min(len(part.rms), len(mix.rms))
-    pr, mr = part.rms[:n], mix.rms[:n]
-    ref = np.percentile(pr, 95) + 1e-9
-    level = 20 * np.log10(pr / ref + 1e-9)
-    share = 20 * np.log10((pr + 1e-9) / (mr + 1e-9))
-    on = (level > -gate_db) & (share > -gate_db * 0.6)
+BLEED_DB = 15.0   # separation leaves other instruments at least this far down in a stem
+
+
+def stem_spectra(monos):
+    """Mel power spectrogram of each stem (mono, 22050 Hz), on the analysis frames."""
+    return {k: librosa.feature.melspectrogram(y=v, sr=SR, n_fft=2048, hop_length=HOP, n_mels=96,
+                                              fmax=8000) for k, v in monos.items()}
+
+
+@dataclass
+class OwnEnergy:
+    """What in a stem can't be bleed from the other stems (see own_energy)."""
+    stem: np.ndarray       # mel power of the stem, bands x frames
+    mine: np.ndarray       # the part of it that can't be bleed
+    total: np.ndarray      # per frame, sum of `mine`
+
+
+def own_energy(spectra, name):
+    """The energy in stem `name` that can't be bleed from another stem: in
+    each frequency band, whatever is more than BLEED_DB below the loudest
+    other stem there. Separation copies a little of every instrument into
+    every stem; this keeps a quiet guitar that really plays and drops a
+    "guitar" that is only the keys or horns leaking in."""
+    others = [v for k, v in spectra.items() if k != name]
+    if not others:
+        return None
+    G = spectra[name]
+    n = min(G.shape[1], *(o.shape[1] for o in others))
+    O = np.max([o[:, :n] for o in others], axis=0)
+    mine = np.clip(G[:, :n] - 10 ** (-BLEED_DB / 10) * O, 0, None)
+    return OwnEnergy(stem=G[:, :n], mine=mine, total=mine.sum(axis=0))
+
+
+def is_own_attack(own, f, min_share=0.2):
+    """Does the attack at frame f come from this instrument? At least
+    `min_share` of the stem's rise there must be energy of its own (an
+    attack that is only bleed rises where another stem rises louder)."""
+    n = own.stem.shape[1]
+    if f + 2 >= n:
+        return True
+    a, b = slice(f + 1, min(f + 5, n)), slice(max(0, f - 5), max(1, f - 1))
+    rise = np.clip(own.stem[:, a].mean(axis=1) - own.stem[:, b].mean(axis=1), 0, None).sum()
+    mine = np.clip(own.mine[:, a].mean(axis=1) - own.mine[:, b].mean(axis=1), 0, None).sum()
+    return mine >= min_share * rise
+
+
+def presence(part, mix, gate_db, own=None):
+    """Per frame: is this isolated instrument really playing?
+
+    With the other stems to compare against (`own` from own_energy), it must
+    have energy of its own (not bleed) within `gate_db` of its loud passages.
+    Without them, it must be within `gate_db` of its loud passages and not
+    buried far below the mix."""
+    if own is not None:
+        energy = own.total[:len(part.rms)]
+        level = 10 * np.log10(energy / (np.percentile(energy, 95) + 1e-12) + 1e-12)
+        on = np.r_[level > -gate_db, np.zeros(len(part.rms) - len(energy), bool)]
+    else:
+        n = min(len(part.rms), len(mix.rms))
+        pr, mr = part.rms[:n], mix.rms[:n]
+        ref = np.percentile(pr, 95) + 1e-9
+        level = 20 * np.log10(pr / ref + 1e-9)
+        share = 20 * np.log10((pr + 1e-9) / (mr + 1e-9))
+        on = (level > -gate_db) & (share > -gate_db * 0.6)
     # smooth over ~120 ms so a note's own attack/decay doesn't flicker
     return maximum_filter1d(on.astype(np.uint8), size=int(0.12 / FRAME_SEC) | 1).astype(bool)
 
@@ -1299,9 +1640,12 @@ def parse_args(argv=None):
                       help="use stems you already separated (guitar.wav, bass.wav, piano.wav, "
                            "vocals.wav, drums.wav, other.wav...) instead of running Demucs")
     inst.add_argument("--stem", help="a single isolated guitar (or bass) track to chart")
-    inst.add_argument("--gate-db", type=float, default=30.0,
+    inst.add_argument("--no-borrow", action="store_true",
+                      help="don't fill bars where the instrument is buried from clearer repeats "
+                           "of the same part")
+    inst.add_argument("--gate-db", type=float, default=45.0,
                       help="ignore an instrument when it's this many dB below its loud parts; lower "
-                           "if separation bleed gets charted, raise if quiet playing is missed (30)")
+                           "if separation bleed gets charted, raise if quiet playing is missed (45)")
     inst.add_argument("--demucs-model", default="htdemucs_6s", help="Demucs model (default htdemucs_6s)")
     inst.add_argument("--device", default="auto", help="auto, cpu, cuda or mps (default auto)")
     inst.add_argument("--no-cache", action="store_true", help="don't reuse/save separated stems")
@@ -1424,17 +1768,44 @@ def prepare(args, candidates=None):
         names = [primary] + [x for x in names if x != primary and x in stems]
         log("Listening to each instrument")
 
+        monos = {k: mono22(v) for k, v in stems.items()}
+        spectra = stem_spectra(monos)
+        bar_prints = bar_fingerprints(an, tempo, pad, bar_ticks, n_bars)
+
         def listen(name):
-            mono = mono22(stems[name])
+            mono = monos[name]
             if np.max(np.abs(mono)) < 1e-4:
                 return
             log(f"  listening to the {LABEL[name]}...")
             pa = analyze(mono, "bass" if name == "bass" else "guitar", None, quiet=True)
-            found = detect_notes(pa, args.density, args.all_onsets, mix=an, gate_db=args.gate_db, src=name)
+            bp = transcriber.posteriorgram(mono)
+            own = own_energy(spectra, name)
+            found = detect_notes(pa, args.density, args.all_onsets, mix=an, gate_db=args.gate_db,
+                                 src=name, bp=bp, instrument=name, own=own)
             qn = quantize(found, tempo, pad, args.triplets)[0] if found else []
-            on = presence(pa, an, args.gate_db)
+            on = presence(pa, an, args.gate_db, own)
+            if name == primary and own is not None and qn and not args.no_borrow:
+                qn = fill_from_repeats(qn, own, on, name)
             parts[name] = (qn, on)
             log(f"    {len(qn)} notes, playing in {100 * on.mean():.0f}% of the song")
+
+        def fill_from_repeats(qn, own, on, name):
+            bar_times = tempo.tick_to_time(np.arange(n_bars + 1) * bar_ticks) - pad
+            bf = np.clip(librosa.time_to_frames(bar_times, sr=SR, hop_length=HOP), 0, len(own.total))
+            # how loud the instrument is against the whole mix, bar by bar
+            mix_power = an.rms ** 2 + 1e-12
+            clarity = np.array([10 * np.log10((own.total[a:max(b, a + 1)].mean() + 1e-12) /
+                                              mix_power[a:max(b, a + 1)].mean())
+                                if a < len(mix_power) else -120.0
+                                for a, b in zip(bf[:-1], bf[1:])])
+            playing = np.array([on[a:max(b, a + 1)].mean() > 0.3 if a < len(on) else False
+                                for a, b in zip(bf[:-1], bf[1:])])
+            new, borrowed = borrow_repeats(qn, bar_prints, clarity, playing, tempo, pad, bar_ticks)
+            if borrowed:
+                log(f"    {len(borrowed)} bars where the {LABEL[name]} is buried were filled in from "
+                    f"clearer repeats (bars {', '.join(str(b + 1) for b, _ in borrowed[:12])}"
+                    f"{'...' if len(borrowed) > 12 else ''})")
+            return new
 
         for name in names:
             listen(name)
@@ -1475,6 +1846,74 @@ def prepare(args, candidates=None):
                    pad_samples=pad_samples, tempo_mode=mode, bpm_text=bpm_text, bar_ticks=bar_ticks,
                    n_bars=n_bars, sections=sections, first_bar=first_bar, parts=parts,
                    recommended=recommended, mix_notes=mix_notes)
+
+
+def bar_fingerprints(an, tempo, pad, bar_ticks, n_bars):
+    """Per bar, the full mix's harmony beat by beat (chroma of each beat,
+    joined), for spotting bars where the band plays the same thing."""
+    beats_per_bar = bar_ticks // RES
+    ticks = np.arange(n_bars * beats_per_bar + 1) * RES
+    frames = np.clip(librosa.time_to_frames(tempo.tick_to_time(ticks) - pad, sr=SR, hop_length=HOP),
+                     0, an.chroma.shape[1] - 1)
+    out = np.zeros((n_bars, beats_per_bar * 12))
+    for i in range(n_bars * beats_per_bar):
+        a, b = frames[i], max(frames[i + 1], frames[i] + 1)
+        v = an.chroma[:, a:b].mean(axis=1)
+        out[i // beats_per_bar, (i % beats_per_bar) * 12:(i % beats_per_bar + 1) * 12] = (
+            v / (np.linalg.norm(v) + 1e-9))
+    return out / np.sqrt(beats_per_bar)
+
+
+def borrow_repeats(notes, fingerprints, clarity, playing, tempo, pad, bar_ticks,
+                   min_sim=0.9, min_gain_db=6.0):
+    """Fill in bars where the instrument is buried, from a clearer repeat.
+
+    Songs repeat. Where the guitar is much quieter against the rest of the
+    band (`clarity`, dB) in one bar than in another bar where the band plays
+    the same music (same harmony beat by beat, in
+    the bars around it too), and what little was heard fits that clearer
+    bar's pattern, the clearer bar's notes are used. That's what a human
+    charter does when a part gets drowned out: chart it like the verse or
+    chorus where it could be heard. Bars where the instrument isn't playing
+    at all are left alone, and so are bars whose notes don't fit."""
+    n_bars = len(fingerprints)
+    if n_bars < 4 or not notes:
+        return notes, []
+    by_bar = {}
+    for n in notes:
+        by_bar.setdefault(n.tick // bar_ticks, []).append(n)
+    S = fingerprints @ fingerprints.T
+    ctx = np.full_like(S, np.nan)
+    for i in range(n_bars):          # the bars around must match too (same place in the song)
+        for j in range(n_bars):
+            vals = [S[i + o, j + o] for o in (-1, 0, 1) if 0 <= i + o < n_bars and 0 <= j + o < n_bars]
+            ctx[i, j] = min(vals) if len(vals) >= 2 else 0.0
+    out, borrowed = dict(by_bar), []
+    usual = np.median(clarity[playing]) if playing.any() else 0.0
+    for b in range(n_bars):
+        if not playing[b] or clarity[b] > usual - min_gain_db:
+            continue                 # not playing, or not buried compared with the rest of the song
+        mine = by_bar.get(b, [])
+        donors = [d for d in range(n_bars) if d != b and ctx[b, d] >= min_sim
+                  and clarity[d] >= clarity[b] + min_gain_db
+                  and len(by_bar.get(d, [])) >= len(mine) + 2]
+        if not donors:
+            continue
+        d = max(donors, key=lambda x: (ctx[b, x], clarity[x]))
+        theirs = by_bar[d]
+        offs = np.array([n.tick - d * bar_ticks for n in theirs])
+        fit = sum(np.min(np.abs(offs - (n.tick - b * bar_ticks))) <= RES // 8 for n in mine)
+        if mine and fit < 0.6 * len(mine):
+            continue                 # it plays something else here
+        shift = (b - d) * bar_ticks
+        copies = []
+        for n in theirs:
+            t = float(tempo.tick_to_time(n.tick + shift)) - pad
+            copies.append(replace(n, tick=n.tick + shift, time=t,
+                                  end_time=n.end_time + t - n.time, frets=(), lane=0))
+        out[b] = copies
+        borrowed.append((b, d))
+    return sorted((n for v in out.values() for n in v), key=lambda n: n.tick), borrowed
 
 
 def plan_notes(proj, plan):

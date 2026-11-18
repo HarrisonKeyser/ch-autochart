@@ -35,7 +35,8 @@ def main():
     gt = np.array([n["time"] for n in g])
     gchord = np.array([len(n["pitches"]) > 1 for n in g])
     keys_t = np.array(sorted(n["time"] for n in key["notes"]["keys"]))
-    others = np.array(sorted(n["time"] for k in ("keys", "vocals", "bass") for n in key["notes"][k]))
+    others = np.array(sorted(n["time"] for k in ("keys", "vocals", "bass", "other")
+                             for n in key["notes"].get(k, [])))
 
     print(f"{'':7s}{'notes':>6s} {'guitar recall':>14s} {'precision':>10s} {'from others':>12s} "
           f"{'in no-guitar (on keys)':>23s} {'chords ok/wrong':>16s}")
@@ -63,6 +64,39 @@ def main():
               f"{chords_ok:8d}/{chords_bad:<7d}")
         for p in problems[:3]:
             print("   PROBLEM:", p)
+        if diff == "Expert" and "--sections" in sys.argv:
+            by_section(g, gt, t, notes, ticks)
+
+
+def by_section(g, gt, t, notes, ticks):
+    """Expert recall and chord agreement within each section of the song."""
+    names = [n.get("section") for n in g]
+    for name in dict.fromkeys(names):
+        if name is None:
+            continue
+        idx = [i for i, s in enumerate(names) if s == name]
+        hit = chord_ok = chords = 0
+        for i in idx:
+            j = int(np.argmin(np.abs(t - gt[i]))) if len(t) else -1
+            if j >= 0 and abs(t[j] - gt[i]) < TOL:
+                hit += 1
+                truth_chord = len(g[i]["pitches"]) > 1
+                chart_chord = len(notes[ticks[j]]) > 1
+                chords += truth_chord
+                chord_ok += truth_chord and chart_chord
+        # a repeated chord (or note) should keep one shape on the chart
+        same = kept = 0
+        for a, b in zip(idx, idx[1:]):
+            if g[a]["pitches"] != g[b]["pitches"]:
+                continue
+            ja, jb = (int(np.argmin(np.abs(t - gt[k]))) for k in (a, b))
+            if abs(t[ja] - gt[a]) < TOL and abs(t[jb] - gt[b]) < TOL and ja != jb:
+                same += 1
+                kept += sorted(f for f, _ in notes[ticks[ja]]) == sorted(f for f, _ in notes[ticks[jb]])
+        level = g[idx[0]].get("level", 1.0)
+        print(f"   {name:10s} level {level:4.2f}: {hit:3d}/{len(idx):3d} caught"
+              + (f", {chord_ok}/{chords} of the caught chords charted as chords" if chords else "")
+              + (f", repeats keep their shape {kept}/{same}" if same else ""))
 
 
 if __name__ == "__main__":

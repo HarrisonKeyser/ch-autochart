@@ -244,6 +244,18 @@ def selftest(out_dir):
             assert found or not FROZEN, "the separation model isn't bundled"
             return found
         step("separation model bundled", model_files)
+
+        def transcription_model():
+            import numpy as np
+            import transcriber
+            path = transcriber.model_path()
+            assert path or not FROZEN, "the note-transcription model isn't bundled"
+            if path is None:
+                return None
+            out = transcriber.posteriorgram(np.zeros(22050, np.float32))
+            assert out is not None and out["note"].shape[1] == 88, "Basic Pitch didn't run"
+            return path
+        step("note-transcription model runs", transcription_model)
         song = os.path.join(out_dir, "selftest.wav")
         step("make test song", lambda: make_test_song(song))
 

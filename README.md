@@ -4,10 +4,14 @@ Turn any song into a ready-to-play **Clone Hero** chart that follows the
 **guitar**, even in a full band mix.
 
 The song is split into its instruments (guitar, bass, drums, vocals, piano and
-"other") with [Demucs](https://github.com/adefossez/demucs), and the chart is
+"other") with [Demucs](https://github.com/adefossez/demucs), the guitar's notes
+and chords are transcribed with Spotify's
+[Basic Pitch](https://github.com/spotify/basic-pitch), and the chart is
 written from the guitar alone. Where the guitar sits out, the chart hands the
 part to whatever is carrying the song instead, the way Guitar Hero charts the
-piano intro or the organ break: the keys, a synth, a harmonica.
+piano intro or the organ break: the keys, a synth, a harmonica. Where the
+guitar is buried under the rest of the band, it borrows the pattern from a
+clearer repeat of the same part, the way a human charter would.
 
 There are three ways to use it:
 
@@ -45,14 +49,15 @@ Put that folder in Clone Hero's `Songs` folder and choose
 3. Open **ch-autochart** from the Start menu.
 
 It needs Windows 10 or 11 (64-bit). Everything it needs is included: Python,
-the separation model and ffmpeg. The first time you finish a chart, point it at
+the separation and transcription models, and ffmpeg. The first time you finish a chart, point it at
 your Clone Hero Songs folder (if it didn't find it already) and charts go
 straight into the game from then on. Uninstall from Settings → Apps.
 
 Each installer is built and tested by GitHub on a clean Windows machine (see
 `.github/workflows/windows-installer.yml`): it charts a test band song with the
-real separation model and scores it, then installs the program silently and
-runs its self-test before anything is published. To publish a new version:
+real separation model and scores it (plus a song built from recorded
+instrument samples, scored section by section), then installs the program
+silently and runs its self-test before anything is published. To publish a new version:
 on GitHub, open **Releases → Draft a new release**, type a new tag such as
 `v2.0.1`, and click **Publish release**. About 40 minutes later the installer
 is attached to it, and the website's download button serves the new version.
@@ -80,7 +85,10 @@ pip install -r requirements.txt
 ```
 
 That includes Demucs and PyTorch (a large download). The first time a song is
-separated, Demucs downloads its model once. Separation takes a few
+separated, Demucs downloads its model once. For note transcription, get the
+Basic Pitch model (230 KB) with `python packaging/fetch_model.py`, or
+`pip install basic-pitch`; without it, a simpler built-in pitch detector is
+used and chords come out less consistent. Separation takes a few
 minutes per song on a regular CPU and well under a minute with an NVIDIA GPU;
 the result is cached, so re-charting the same song is quick. Without Demucs
 everything still works, but the chart follows the full mix.
@@ -138,7 +146,8 @@ python autochart.py SONG [options]
 | `--split-audio` | Write the charted part to `guitar.ogg` and the rest to `song.ogg`, so the part drops out when you miss notes. |
 | `--stems FOLDER` | Use stems you already have (`guitar.wav`, `bass.wav`, `piano.wav`, `vocals.wav`, `drums.wav`, `other.wav`…). |
 | `--stem FILE` | Use a single isolated guitar (or bass) track. |
-| `--gate-db 30` | How far below its loud parts an instrument can be and still count as playing. Lower it if separation bleed gets charted. |
+| `--gate-db 45` | How far below its loud parts an instrument can be and still count as playing (bleed from other instruments is recognised separately). Lower it if faint noise gets charted. |
+| `--no-borrow` | Don't fill bars where the guitar is buried from clearer repeats of the same part. |
 | `--device auto\|cpu\|cuda\|mps` | Where Demucs runs. `--no-cache` skips the stem cache. |
 | `--difficulties expert,hard` | Only generate some difficulties. |
 | `--density 1.3` | More (above 1) or fewer (below 1) notes. |
@@ -170,10 +179,18 @@ python autochart.py song.mp3 --stems "song stems/"
 Every instrument the song was split into is transcribed on its own: note
 timings, pitches, chords and how long each note rings. Then, bar by bar:
 
-- **The guitar wins wherever it is really playing.** An instrument only counts
-  as playing where it is within `--gate-db` of its own loud parts and not
-  buried under the rest of the mix. Separated stems always carry faint traces
-  of other instruments, and this keeps those out of the chart.
+- **The guitar wins wherever it is really playing, even quietly.** Separated
+  stems always carry faint traces of the other instruments, so each stem is
+  compared with all the others, band by band: whatever in the guitar stem is
+  15 dB or more below another stem at the same pitch could be bleed, and only
+  the rest counts as guitar. Each attack is checked the same way, so a piano
+  chord or horn stab leaking into the guitar stem isn't charted, while a
+  quiet guitar under a loud band still is.
+- **Where the guitar is buried**, much quieter against the band than usual,
+  and the same music (beat-by-beat harmony, including the bars around it)
+  plays elsewhere with the guitar clearly audible, the chart uses that
+  clearer bar's pattern, as long as what was heard fits it. `--no-borrow`
+  turns this off; the log lists the bars it filled.
 - **Where the guitar is silent**, the busiest allowed instrument (more notes
   and more varied pitches score higher; keys and synths are preferred over
   bass and vocals) can take over.
@@ -193,17 +210,22 @@ The studio shows this plan, and you can repaint it before building.
 
 ## How the chart is made
 
-1. **Tempo map.** Beats are tracked, re-timed on a fine (~3 ms) onset envelope,
-   and fitted to one constant BPM when the song is steady, or to a BPM marker
-   wherever the tempo drifts. Beat 1 of each bar comes from kick/bass hits and
+1. **Tempo map.** The tempo is fitted to the attacks of the whole song at once
+   (folded at the half beat, so a beat tracker that slips onto the off-beat in
+   songs with off-beat strums or skanks can't make the tempo wobble), and the
+   kick drum says which half is the beat. Steady songs get one exact BPM;
+   songs that drift get a BPM marker wherever the tempo moves. Beat 1 of each bar comes from kick/bass hits and
    chord changes. A silent lead-in is added so the chart starts on a downbeat.
-2. **Notes.** Attacks are found in each instrument and pinned to the exact
-   moment, judged against the playing around them so heavily compressed
-   distorted guitar still registers, then snapped to a 1/16 (or 1/12) grid.
-3. **Chords.** Real chords are heard, not guessed: after the strongest pitch is
-   found, its harmonics are removed and the detector looks for another pitch
-   nearly as strong. Power chords become two-fret chords, full strums three.
-   Octave errors from re-struck ringing notes are corrected.
+2. **Notes.** Attacks are found in each instrument's stem (a SuperFlux onset
+   envelope, compressed and judged against the playing around it so soft
+   strums between loud ones and quiet passages still register), pinned to the
+   exact moment, checked for bleed, then snapped to a 1/16 (or 1/12) grid.
+3. **Pitches and chords** come from Basic Pitch, a small neural network
+   trained on real instruments: the keys that start at each attack (not the
+   ones still ringing from before), minus overtones. Repeated strums of one
+   chord are grouped and given one bass note and one size, so the chart
+   repeats one shape, the way a human charts a strummed chord. Power chords
+   become two-fret chords, full strums three.
 4. **Frets** follow the melody's contour like a human charter: up the neck when
    the pitch rises, the same fret for a repeated note, bigger jumps for bigger
    leaps. A Viterbi search plans ahead so a rising run starts low enough to keep
@@ -218,12 +240,17 @@ The studio shows this plan, and you can repaint it before building.
 
 ## Testing
 
-`tests/` synthesizes songs whose every note is known and scores the charts:
+`tests/` builds songs whose every note is known and scores the charts:
 
 ```
 python tests/make_band_song.py band.wav          # guitar, bass, drums, keys, vocals + their stems
 python autochart.py band.wav --stems band_stems --artist Band --title Test
 python tests/check_guitar.py "Band - Test" band.wav
+
+# from recorded instrument samples (FluidR3_GM folder of github.com/gleitz/midi-js-soundfonts)
+python tests/make_sampled_song.py song.wav --samples FluidR3_GM
+python autochart.py song.wav --stems song_stems_bleed --fill off --artist T --title Sampled
+python tests/check_guitar.py "T - Sampled" song.wav --sections
 
 python tests/make_test_song.py test.wav --bpm 128   # timing/tempo tests (--drift 9 for live feel)
 python tests/check_chart.py "Test - Test" test.wav

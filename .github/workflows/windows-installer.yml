@@ -70,6 +70,30 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/scores.md"
           python ../.github/ci/annotate.py "$RUNNER_TEMP/scores.md" "Test band song scores (real separation)" notice
 
+      - name: Chart a test song built from recorded instrument samples
+        shell: bash
+        continue-on-error: true
+        run: |
+          # Clean electric guitar strums and chops, overdriven chords, a lead,
+          # piano and horns, with the guitar buried in the second verse and
+          # chorus; scored per section with real separation and with stems
+          # that have bleed (tests/make_sampled_song.py).
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/gleitz/midi-js-soundfonts build/soundfonts
+          git -C build/soundfonts sparse-checkout set FluidR3_GM/electric_guitar_clean-mp3 \
+            FluidR3_GM/electric_bass_finger-mp3 FluidR3_GM/acoustic_grand_piano-mp3 \
+            FluidR3_GM/trumpet-mp3 FluidR3_GM/alto_sax-mp3
+          python tests/make_sampled_song.py build/sampled.wav --samples build/soundfonts/FluidR3_GM
+          python autochart.py build/sampled.wav --separate on --artist CI --title "Sampled" -o build --force --fill off
+          python autochart.py build/sampled.wav --stems build/sampled_stems_bleed --artist CI --title "Sampled bleed" -o build --force --fill off
+          cd tests
+          {
+            echo "## Sampled test song"
+            for name in "Sampled" "Sampled bleed"; do
+              echo "### $name"; echo '```'; python check_guitar.py "../build/CI - $name" ../build/sampled.wav --sections; echo '```'
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/sampled.md"
+          python ../.github/ci/annotate.py "$RUNNER_TEMP/sampled.md" "Sampled test song scores" notice
+
       - name: Chart real recordings (no answer key, just checks they work)
         shell: bash
         continue-on-error: true
