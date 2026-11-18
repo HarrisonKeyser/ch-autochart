@@ -257,37 +257,65 @@ python tests/check_chart.py "Test - Test" test.wav
 ```
 
 The band song has a keys-only intro and a break with no guitar, and its keys
-and vocals play in the guitar's register on other rhythms. Expert results:
+and vocals play in the guitar's register on other rhythms. Expert results
+with perfect stems:
 
 | | Guitar notes caught | Chart notes that are guitar | Notes where the guitar is silent | Chords right / wrong |
 | --- | --- | --- | --- | --- |
 | Full mix, no separation | 99% | 77% | 52 (mostly keys, plus bleed) | 3 / 26 |
-| Separated, `--fill off` | 98% | 100% | 0 | 25 / 13 |
-| Separated, `--fill smart` (default) | 98% | 85% (the rest are deliberate keys fills) | 32, every one on a keys note | 25 / 14 |
+| Separated, `--fill off` | 100% | 100% | 0 | 41 / 9 |
+| Separated, `--fill smart` (default) | 100% | 85% (the rest are deliberate keys fills) | 32, every one on a keys note | 41 / 25 |
 
-Each instrument on its own is transcribed with 97–100% recall and 98–100%
-precision. Timing tests: constant tempos come out exact (128.00 and 152.00 BPM,
-beats within ~1 ms), a 112→121 BPM drift is followed within ~5 ms, and bar
-lines land on the downbeat in every test. Generated folders pass
-[scan-chart](https://github.com/Geomitron/scan-chart) (the parser Chorus Encore
-uses to match Clone Hero) as playable with no chart issues.
+The sampled song (recorded instruments; the guitar 14 dB quieter in the
+second verse and 10 dB in the second chorus) with stems that have the other
+instruments leaking in, `--fill off`, compared with the previous engine:
 
-The table uses perfect stems. With real Demucs separation (run on every
-Windows build), the synthesized plucked-string "guitar" isn't recognised as a
-guitar and mostly lands in Demucs's "other" track; the empty-guitar fallback
-then charts from "other", catching 91% of guitar notes, with more stray notes
-from the keys bleeding into "other" (64% precision). Real recordings separate
-better: on the two sample recordings the build charts, the guitar track carried
-the song, with the keys filling one passage. Real separation is messier than
-perfect stems, which is what `--gate-db` and the studio's plan editor are for.
+| Section | Previous engine: caught | Now: caught | Now: repeated chords keep one shape |
+| --- | --- | --- | --- |
+| Verse (clean off-beat chops) | 39 / 40 | 40 / 40 | 25 / 32 |
+| Chorus (overdriven 8th strums) | 59 / 64 | 60 / 64 | 23 / 24 (was 1 / 21) |
+| Solo (single notes) | 60 / 60 | 60 / 60 | |
+| Verse 2 (guitar buried) | 0 / 40 | 38 / 40 | 21 / 29 |
+| Chorus 2 (guitar quieter) | 59 / 64 | 61 / 64 | 21 / 23 (was 0 / 20) |
+
+Overall 97% of guitar notes caught with 96% of chart notes on guitar notes;
+with perfect stems, 98% and 100%. Timing tests: constant tempos come out
+exact (128.00 and 152.00 BPM, beats within ~2 ms), a 112→121 BPM drift is
+followed within ~5 ms, and bar lines land on the downbeat in every test.
+Generated folders pass [scan-chart](https://github.com/Geomitron/scan-chart)
+(the parser Chorus Encore uses to match Clone Hero) as playable with no chart
+issues.
+
+Every Windows build also runs both songs through real Demucs separation and
+posts the scores on the run page. Real separation is messier than these stems:
+on the sampled song, 88% of guitar notes are caught and 75% of chart notes are
+guitar, with most strays coming from the piano leaking into the guitar track
+in the piano-only intro and break, and only half the buried second verse is
+recovered. The synthesized band's plucked-string "guitar" isn't recognised as
+a guitar at all and lands in "other", which the empty-guitar fallback then
+charts (90% caught). The separated tracks are kept as a build artifact for
+tuning.
 
 ## Limitations
 
 - Separation quality sets the ceiling. Demucs's guitar stem is good on rock and
   pop and weaker on dense mixes or clean guitar buried under keys.
+- Borrowing from repeats only fills bars where the guitar is buried and the
+  band plays the same music elsewhere; a part that is buried every time it
+  plays can't be recovered that way.
 - Section names are educated guesses from repetition and loudness.
 - No forced HOPOs/taps, open notes, solos or lyrics. Clone Hero's automatic
   HOPOs apply (fast notes on different frets become HOPOs).
 - Songs with heavy rubato or free-time intros may need tempo touch-ups in
   [Moonscraper](https://github.com/FireFox2000000/Moonscraper-Chart-Editor/releases).
 - Chart only songs you have the rights to use.
+
+## Credits
+
+- [Demucs](https://github.com/adefossez/demucs) (MIT) separates the instruments.
+- [Basic Pitch](https://github.com/spotify/basic-pitch) by Spotify (Apache
+  License 2.0) transcribes notes; its model, license and notice ship in
+  `models/basic_pitch/`.
+- The sampled test song uses the FluidR3 soundfont as rendered by
+  [midi-js-soundfonts](https://github.com/gleitz/midi-js-soundfonts)
+  (CC BY 3.0), downloaded only for testing.

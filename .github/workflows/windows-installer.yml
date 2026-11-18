@@ -94,6 +94,14 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/sampled.md"
           python ../.github/ci/annotate.py "$RUNNER_TEMP/sampled.md" "Sampled test song scores" notice
 
+      - name: Keep the separated test songs for tuning
+        uses: actions/upload-artifact@v7
+        continue-on-error: true
+        with:
+          name: separated-test-songs
+          path: ~/AppData/Local/ch-autochart/stems
+          retention-days: 14
+
       - name: Chart real recordings (no answer key, just checks they work)
         shell: bash
         continue-on-error: true
