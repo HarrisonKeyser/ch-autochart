@@ -939,6 +939,7 @@ class OwnEnergy:
     stem: np.ndarray       # mel power of the stem, bands x frames
     mine: np.ndarray       # the part of it that can't be bleed
     total: np.ndarray      # per frame, sum of `mine`
+    others: list           # mel power of the other stems
 
 
 def own_energy(spectra, name):
@@ -954,7 +955,8 @@ def own_energy(spectra, name):
     n = min(G.shape[1], *(o.shape[1] for o in others))
     O = np.max([o[:, :n] for o in others], axis=0)
     mine = np.clip(G[:, :n] - 10 ** (-BLEED_DB / 10) * O, 0, None)
-    return OwnEnergy(stem=G[:, :n], mine=mine, total=mine.sum(axis=0))
+    return OwnEnergy(stem=G[:, :n], mine=mine, total=mine.sum(axis=0),
+                     others=[o[:, :n] for o in others])
 
 
 def is_own_attack(own, f, min_share=0.2):
@@ -965,9 +967,17 @@ def is_own_attack(own, f, min_share=0.2):
     if f + 2 >= n:
         return True
     a, b = slice(f + 1, min(f + 5, n)), slice(max(0, f - 5), max(1, f - 1))
-    rise = np.clip(own.stem[:, a].mean(axis=1) - own.stem[:, b].mean(axis=1), 0, None).sum()
-    mine = np.clip(own.mine[:, a].mean(axis=1) - own.mine[:, b].mean(axis=1), 0, None).sum()
-    return mine >= min_share * rise
+    rise = np.clip(own.stem[:, a].mean(axis=1) - own.stem[:, b].mean(axis=1), 0, None)
+    mine = np.clip(own.mine[:, a].mean(axis=1) - own.mine[:, b].mean(axis=1), 0, None)
+    if mine.sum() < min_share * rise.sum():
+        return False
+    # A louder stem rising at the same moment with the same spectrum: this
+    # is a copy of that attack (separation bleed), whatever its level.
+    for o in own.others:
+        other = np.clip(o[:, a].mean(axis=1) - o[:, b].mean(axis=1), 0, None)
+        if other.sum() >= rise.sum() and other @ rise >= 0.95 * np.linalg.norm(other) * np.linalg.norm(rise):
+            return False
+    return True
 
 
 def presence(part, mix, gate_db, own=None):
@@ -1811,7 +1821,15 @@ def prepare(args, candidates=None):
             listen(name)
         mode_fill, weights = args.fill, None
         n_primary = len(parts.get(primary, ([],))[0])
-        if n_primary < max(8, 0.002 * an.duration * 60):
+        nearly_empty = n_primary < max(8, 0.002 * an.duration * 60)
+        if not nearly_empty and n_primary < 40 * an.duration / 60:
+            # Sparse: a quiet part, or just bleed from what really plays? Compare
+            # with the busiest other instrument.
+            for name in [x for x in CHARTABLE if x in stems and x not in parts]:
+                listen(name)
+            busiest = max([len(v[0]) for k, v in parts.items() if k != primary] or [0])
+            nearly_empty = n_primary < 0.25 * busiest
+        if nearly_empty:
             # Separation found (almost) nothing for the main instrument: the
             # song may have none, or its tone landed in another track (synth
             # leads, unusual guitar sounds). Chart whatever carries the song.
