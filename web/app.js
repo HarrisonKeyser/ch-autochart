@@ -1246,8 +1246,10 @@ async function initUpdates() {
     (info.size ? ` The update is a ${Math.round(info.size / 1048576)} MB download.` : "")));
   const notes = $("#update-notes");
   notes.href = info.page || "#";
-  notes.addEventListener("click", (e) => {
-    if (desktop()) { e.preventDefault(); window.pywebview.api.open_link(info.page); }
+  notes.addEventListener("click", async (e) => {
+    if (!desktop()) return;
+    e.preventDefault();
+    try { await window.pywebview.api.open_link(info.page); } catch { window.open(info.page, "_blank"); }
   });
   $("#update-later").addEventListener("click", () => { bar.hidden = true; });
   const install = $("#update-install");
@@ -1265,7 +1267,8 @@ async function installUpdate(info) {
   const text = $("#update-text");
   $("#update-install").hidden = true;
   $("#update-later").hidden = true;
-  const res = await window.pywebview.api.install_update();
+  let res;
+  try { res = await window.pywebview.api.install_update(); } catch (err) { res = { error: `The update couldn't start (${err}).` }; }
   if (!res || res.error) {
     text.textContent = (res && res.error) || "The update couldn't start.";
     $("#update-install").hidden = false;
@@ -1273,7 +1276,8 @@ async function installUpdate(info) {
   }
   text.innerHTML = `Downloading version ${info.latest}… <span class="update-meter"><i></i></span>`;
   const poll = async () => {
-    const st = await window.pywebview.api.update_status();
+    let st;
+    try { st = await window.pywebview.api.update_status(); } catch (err) { st = { state: "error", error: String(err) }; }
     if (st.state === "error") {
       text.textContent = `The download failed: ${st.error}. Check your internet connection and try again.`;
       $("#update-install").hidden = false;

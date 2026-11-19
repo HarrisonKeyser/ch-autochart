@@ -81,11 +81,16 @@ def open_path(path):
 
 
 class DesktopApi:
-    """Things the page can ask the desktop program to do (window.pywebview.api)."""
+    """Things the page can ask the desktop program to do (window.pywebview.api).
+
+    pywebview exposes every public attribute to the page and walks into each
+    one, so anything that isn't a method stays private (a leading underscore):
+    a public `window` sent it into infinite recursion through the native
+    window and left the page without a working bridge."""
 
     def __init__(self):
-        self.window = None
-        self.download = None
+        self._window = None
+        self._download = None
 
     def save_zip(self, job_id):
         import webview
@@ -94,7 +99,7 @@ class DesktopApi:
         zips = [f for f in os.listdir(job.dir) if f.endswith(".zip")] if job else []
         if not zips:
             return {"error": "Build the chart first."}
-        result = self.window.create_file_dialog(
+        result = self._window.create_file_dialog(
             webview.FileDialog.SAVE, directory=os.path.expanduser("~/Downloads"),
             save_filename=zips[0], file_types=("Zip files (*.zip)",))
         if not result:
@@ -112,7 +117,7 @@ class DesktopApi:
         if not job or job.proj is None or not job.proj.parts:
             return {"error": "There are no separated instruments to save notes from."}
         src = studio.write_midi(job)
-        result = self.window.create_file_dialog(
+        result = self._window.create_file_dialog(
             webview.FileDialog.SAVE, directory=os.path.expanduser("~/Documents"),
             save_filename=os.path.basename(src), file_types=("MIDI files (*.mid)",))
         if not result:
@@ -126,7 +131,7 @@ class DesktopApi:
     def choose_songs_folder(self):
         import webview
         import app as studio
-        result = self.window.create_file_dialog(webview.FileDialog.FOLDER)
+        result = self._window.create_file_dialog(webview.FileDialog.FOLDER)
         if not result:
             return {"cancelled": True}
         folder = result if isinstance(result, str) else result[0]
@@ -152,21 +157,21 @@ class DesktopApi:
         if not info.get("available"):
             return {"error": "No update is available right now."}
         dest = os.path.join(data_dir(), "updates", f"ch-autochart-setup-{info['latest']}.exe")
-        if self.download is None or self.download.state == "error":
-            self.download = updates.Download(info["download"], dest, info.get("size"))
+        if self._download is None or self._download.state == "error":
+            self._download = updates.Download(info["download"], dest, info.get("size"))
         return {"started": True, "version": info["latest"]}
 
     def update_status(self):
-        return self.download.status() if self.download else {"state": "idle"}
+        return self._download.status() if self._download else {"state": "idle"}
 
     def run_installer(self):
         """Start the downloaded installer and close this program so it can be
         replaced. The installer reopens ch-autochart when it's done."""
-        if not self.download or self.download.state != "ready":
+        if not self._download or self._download.state != "ready":
             return {"error": "The update hasn't finished downloading."}
         if os.name != "nt":
             return {"error": "Updates install on Windows only."}
-        subprocess.Popen([self.download.dest, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+        subprocess.Popen([self._download.dest, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
                           "/CLOSEAPPLICATIONS", "/relaunch=1"], close_fds=True)
         threading.Timer(1.5, lambda: os._exit(0)).start()
         return {"ok": True}
@@ -182,7 +187,7 @@ def run_window(url):
         window = webview.create_window(
             "ch-autochart", url, js_api=api, width=1440, height=940, min_size=(900, 640),
             background_color="#241A1A", text_select=True)
-        api.window = window
+        api._window = window
         icon = os.path.join(BASE, "packaging", "icon.ico")
         webview.start(private_mode=False, storage_path=os.path.join(data_dir(), "webview"),
                       icon=icon if os.path.exists(icon) else None)
