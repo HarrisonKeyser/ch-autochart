@@ -207,6 +207,8 @@ details.stems p { margin: 10px 0; max-width: 62ch; }
 }
 .mute-solo button[aria-pressed="true"].m { background: var(--danger); border-color: var(--danger); color: #2a1310; }
 .mute-solo button[aria-pressed="true"].s { background: var(--brass); border-color: var(--brass); color: #2a1d10; }
+.mute-solo button.n { width: auto; padding: 0 7px; font-weight: 600; }
+.mute-solo button[aria-pressed="true"].n { background: var(--ink, #ede3d6); border-color: var(--ink, #ede3d6); color: #241a1a; }
 .row.chart .label { gap: 6px; }
 .scrollbar { grid-column: 2; padding: 6px 10px 8px; }
 .scrollbar input { width: 100%; accent-color: var(--brass); }

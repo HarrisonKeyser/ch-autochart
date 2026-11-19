@@ -1,6 +1,6 @@
 Turn any song into a Clone Hero chart that follows the guitar.
 
-**What's new:** much better charts from the separated guitar. Strums that used to be dropped are charted (often two to three times as many notes), the tempo no longer wobbles on songs with off-beat strumming, notes and chords come from a transcription model trained on real guitar, a repeated chord keeps one shape, quiet guitar under a loud band still counts, and bars where the guitar is buried borrow the pattern from a clearer repeat of the same part. To re-chart a song you already did, drop it in again: its separated tracks are kept, so it's quick.
+**What's new:** see what the bot heard. Click **Notes** on any instrument's track in the studio to see its notes as a piano roll that lights up as the song plays, and **Save notes as MIDI** to open them in MuseScore or another music program.
 
 **To install:** download `ch-autochart-setup.exe` below and run it. Windows 10 or 11 (64-bit).
 

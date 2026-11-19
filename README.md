@@ -118,6 +118,10 @@ computer; nothing is uploaded anywhere.
      leave a rest. Reset to the recommendation at any time;
    - a chart preview under the tracks and a scrolling highway beside them, in
      sync with playback, for each difficulty.
+   - **Notes** on an instrument's track shows what was heard there as a piano
+     roll (every note of each chord, lighting up as it plays), so you can
+     check the transcription against the audio. **Save notes as MIDI** saves
+     it for MuseScore or any music program.
 4. **Approve**, then add album art, title, artist, album, year, genre and
    charter. Choose difficulties and whether the charted part gets its own audio
    track. If your Clone Hero songs folder is found, it can be installed there
@@ -147,6 +151,7 @@ python autochart.py SONG [options]
 | `--stems FOLDER` | Use stems you already have (`guitar.wav`, `bass.wav`, `piano.wav`, `vocals.wav`, `drums.wav`, `other.wav`…). |
 | `--stem FILE` | Use a single isolated guitar (or bass) track. |
 | `--gate-db 45` | How far below its loud parts an instrument can be and still count as playing (bleed from other instruments is recognised separately). Lower it if faint noise gets charted. |
+| `--midi FILE` | Also save what each separated instrument played as a MIDI file (open it in MuseScore to read it as a score). |
 | `--no-borrow` | Don't fill bars where the guitar is buried from clearer repeats of the same part. |
 | `--device auto\|cpu\|cuda\|mps` | Where Demucs runs. `--no-cache` skips the stem cache. |
 | `--difficulties expert,hard` | Only generate some difficulties. |

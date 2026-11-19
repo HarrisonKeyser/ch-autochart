@@ -218,6 +218,7 @@ function openStudio(project) {
   S.preview = project.preview;
   S.mute = {};
   S.solo = {};
+  S.roll = {};
   S.audio.offset = 0;
   for (const t of project.tracks) S.mute[t.id] = project.separated && t.id === "mix";
 
@@ -240,6 +241,7 @@ function openStudio(project) {
   notice.textContent = project.notice || "";
   $("#hint").hidden = !project.separated;
   $("#reset-plan").hidden = !project.separated;
+  $("#save-midi").hidden = !project.separated;
   $("#total").textContent = fmt(project.duration);
 
   buildTrackRows();
@@ -267,6 +269,7 @@ function buildTrackRows() {
           <span class="mute-solo">
             <button type="button" class="m" aria-pressed="${S.mute[t.id]}" title="Mute">M</button>
             <button type="button" class="s" aria-pressed="false" title="Solo">S</button>
+            <button type="button" class="n" aria-pressed="false" title="Show the notes heard" hidden>Notes</button>
           </span>
         </div>
       </div>
@@ -288,6 +291,17 @@ function buildTrackRows() {
       e.currentTarget.setAttribute("aria-pressed", String(S.solo[t.id]));
       applyGains();
     });
+    if (t.chartable && nNotes) {
+      const nb = $(".n", row);
+      nb.hidden = false;
+      nb.setAttribute("aria-label", `Show the notes heard in the ${t.name}`);
+      nb.addEventListener("click", (e) => {
+        S.roll[t.id] = !S.roll[t.id];
+        e.currentTarget.setAttribute("aria-pressed", String(S.roll[t.id]));
+        canvas.dataset.h = S.roll[t.id] ? 220 : 64;
+        drawTrack(row);
+      });
+    }
     attachPainter(canvas, t);
     box.append(row);
   }
@@ -479,10 +493,11 @@ function drawTrack(row) {
     }
   }
 
-  // waveform
+  // waveform (faint behind the notes when they're shown)
   const peaks = t.peaks, pps = S.project.peaks_per_sec;
   const mid = h / 2;
-  ctx.fillStyle = t.chartable || id === "mix" ? color : color + "99";
+  const rolled = S.roll[id] && t.notes.length;
+  ctx.fillStyle = rolled ? color + "26" : t.chartable || id === "mix" ? color : color + "99";
   const step = 1;
   for (let x = 0; x < w; x += step) {
     const a = Math.floor(xt(x) * pps), b = Math.max(a + 1, Math.floor(xt(x + step) * pps));
@@ -493,8 +508,9 @@ function drawTrack(row) {
     if (amp > 0.3) ctx.fillRect(x, mid - amp, step, amp * 2);
   }
 
+  if (rolled) drawRoll(ctx, w, h, t, color);
   // where notes were heard
-  if (t.notes.length && t.chartable) {
+  else if (t.notes.length && t.chartable) {
     ctx.fillStyle = "rgba(237,227,214,.55)";
     const t0 = S.view.start, t1 = xt(w);
     for (const n of t.notes) {
@@ -504,6 +520,44 @@ function drawTrack(row) {
   }
   row.classList.toggle("dim", isSilenced(id));
   playheadAt(ctx, h);
+}
+
+// The notes heard in one track, as a piano roll: one row per semitone,
+// a line at every C, each note from its (beat-snapped) start for as long as
+// it rings. Notes sounding at the playhead light up.
+function drawRoll(ctx, w, h, t, color) {
+  if (!t.range) {
+    let lo = 127, hi = 0;
+    for (const n of t.notes) for (const k of n[4]) { lo = Math.min(lo, k); hi = Math.max(hi, k); }
+    if (hi - lo < 11) { const c = Math.round((lo + hi) / 2); lo = c - 6; hi = c + 5; }
+    t.range = [lo - 1, hi + 1];
+  }
+  const [lo, hi] = t.range;
+  const top = 6, bot = h - 6, rowH = (bot - top) / (hi - lo + 1);
+  const y = (k) => bot - (k - lo + 1) * rowH;
+  ctx.font = "10px system-ui, sans-serif";
+  for (let k = Math.ceil(lo / 12) * 12; k <= hi; k += 12) {
+    const yy = Math.round(y(k) + rowH) + 0.5;
+    ctx.fillStyle = "rgba(237,227,214,.14)";
+    ctx.fillRect(0, yy, w, 1);
+    ctx.fillStyle = "rgba(237,227,214,.5)";
+    ctx.fillText(`C${k / 12 - 1}`, 4, yy - 2);
+  }
+  const t0 = S.view.start, t1 = xt(w), cur = now();
+  const bh = Math.max(2, rowH - 1);
+  for (const n of t.notes) {
+    const s = n[0], e = n[0] + n[3];
+    if (e < t0 || s > t1) continue;
+    const x0 = tx(s), x1 = Math.max(x0 + 3, tx(e));
+    const lit = cur >= s && cur < e;
+    for (const k of n[4]) {
+      if (k < lo || k > hi) continue;
+      ctx.fillStyle = lit ? "#fff4e0" : color;
+      ctx.fillRect(x0, y(k), x1 - x0, bh);
+      ctx.fillStyle = "rgba(0,0,0,.35)";
+      ctx.fillRect(x0, y(k), 1.5, bh);      // a dark edge marks where each note starts
+    }
+  }
 }
 
 function currentChart() {
@@ -972,6 +1026,20 @@ function initStudio() {
     requestPreview();
   });
   $("#approve").addEventListener("click", openDetails);
+  $("#save-midi").addEventListener("click", async () => {
+    if (desktop()) {
+      const res = await window.pywebview.api.save_midi(S.jobId);
+      if (res && res.path) window.pywebview.api.show_in_folder(res.path);
+      else if (res && res.error) alert(res.error);
+      return;
+    }
+    const a = document.createElement("a");
+    a.href = `/api/jobs/${S.jobId}/notes.mid`;
+    a.download = "";
+    document.body.append(a);
+    a.click();
+    a.remove();
+  });
   window.addEventListener("resize", () => { if (S.project) { resizeAll(); setZoom(+$("#zoom").value); } });
   document.addEventListener("keydown", (e) => {
     if ($("#studio").hidden || e.target.closest("input, select, textarea, button")) return;

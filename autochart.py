@@ -131,6 +131,7 @@ class Note:
     pitch: float         # pitch estimate in semitones (CQT bin)
     end_time: float      # when the note stops ringing (original timeline)
     poly: int = 1        # how many simultaneous pitches started here (chords)
+    keys: tuple = ()     # MIDI note numbers heard at this attack (stems only)
     src: str = "mix"     # which instrument this note was heard in
     tick: int = 0
     lane: int = 0
@@ -754,6 +755,7 @@ def detect_stem_notes(an, density, mix, gate_db, src, bp=None, instrument="guita
             continue                    # another instrument's attack, leaking in
         nxt = frames[i + 1] if i + 1 < len(frames) else nf
         pitch = poly = end_f = sound = None
+        heard_keys = ()
         if bp is not None:
             # the model's frames line up with the attack itself, which the
             # onset envelope reports a few frames late
@@ -774,6 +776,7 @@ def detect_stem_notes(an, density, mix, gate_db, src, bp=None, instrument="guita
                 root = int(on[0])
                 pitch = float(keys[root] - fmin_midi)
                 poly = min(len({int(k) % 12 for k in on}), 3)
+                heard_keys = tuple(int(keys[k]) for k in on)
                 ring = bp["note"][fb:min(fb + int(8.0 / FRAME_SEC), len(bp["note"])), root]
                 quiet = np.where(ring < 0.25)[0]
                 quiet = quiet[quiet >= 3]
@@ -790,12 +793,13 @@ def detect_stem_notes(an, density, mix, gate_db, src, bp=None, instrument="guita
                 rise = np.clip(an.Cw[:, a:b].mean(axis=1), 0, None)
             f0s = find_pitches(rise, after)
             pitch, poly = float(min(f0s)), len(f0s)
+            heard_keys = tuple(sorted({int(round(p + fmin_midi)) for p in f0s}))
             track = an.Cdb[max(0, f0s[0] - 1):f0s[0] + 2, f:min(nf, f + int(8.0 / FRAME_SEC))].max(axis=0)
             gone = np.where(track < track[:6].max() - 8.0)[0]
             gone = gone[gone >= 3]
             end_f = f + (int(gone[0]) if len(gone) else len(track))
         notes.append(Note(time=float(times[i]), strength=float(strength[i]), pitch=pitch,
-                          end_time=float(end_f * FRAME_SEC), poly=poly, src=src))
+                          end_time=float(end_f * FRAME_SEC), poly=poly, src=src, keys=heard_keys))
         sounds.append(sound)
     steady_chords(notes, sounds, keys - fmin_midi)
     return notes
@@ -1643,6 +1647,9 @@ def parse_args(argv=None):
     inst.add_argument("--fill-from", default=None,
                       help="instruments allowed to fill in, in any of piano,other,bass,vocals,guitar "
                            "(default: piano,other for guitar charts; none for bass charts)")
+    inst.add_argument("--midi", metavar="FILE",
+                      help="also save what each separated instrument played as a MIDI file "
+                           "(open it in MuseScore to read it as a score)")
     inst.add_argument("--split-audio", action="store_true",
                       help="write the charted part to its own track (guitar.ogg / bass.ogg) so "
                            "Clone Hero mutes it when you miss, like the real games")
@@ -1999,6 +2006,13 @@ def write_song(proj, tracks, plan, folder, meta, album_art=None, split_audio=Fal
         write_album_art(album_art, os.path.join(folder, "album.png"))
 
 
+def transcription_midi(proj, title=""):
+    """MIDI bytes of every separated instrument's notes (see midi_export.py)."""
+    import midi_export
+    return midi_export.transcription({k: v[0] for k, v in proj.parts.items()}, proj.tempo, proj.pad,
+                                     (int(proj.args.time_signature), 4), title)
+
+
 def describe_plan(proj, plan):
     """Lines like 'bars 1-8: piano/keys' for passages not charted from the main instrument."""
     if not proj.parts:
@@ -2034,6 +2048,10 @@ def main(argv=None):
 
     log("Writing song folder")
     write_song(proj, tracks, None, folder, meta, args.album_art, args.split_audio)
+    if args.midi and proj.parts:
+        with open(args.midi, "wb") as fh:
+            fh.write(transcription_midi(proj, f"{meta['artist']} - {meta['title']}"))
+        log(f"  what each instrument played (MIDI): {args.midi}")
 
     log("")
     log(f"Done: {folder}")

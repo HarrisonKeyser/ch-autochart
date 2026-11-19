@@ -14,7 +14,7 @@ datas = [
     (os.path.join(ROOT, "packaging", "icon.ico"), "packaging"),
 ]
 binaries = []
-hiddenimports = ["app", "autochart", "desktop", "transcriber"]
+hiddenimports = ["app", "autochart", "desktop", "transcriber", "midi_export"]
 
 # Packages that load data files or plugins at run time, which PyInstaller
 # can't discover by reading imports alone.

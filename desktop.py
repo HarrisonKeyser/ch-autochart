@@ -105,6 +105,24 @@ class DesktopApi:
         shutil.copyfile(os.path.join(job.dir, zips[0]), dest)
         return {"path": dest}
 
+    def save_midi(self, job_id):
+        import webview
+        import app as studio
+        job = studio.JOBS.get(job_id)
+        if not job or job.proj is None or not job.proj.parts:
+            return {"error": "There are no separated instruments to save notes from."}
+        src = studio.write_midi(job)
+        result = self.window.create_file_dialog(
+            webview.FileDialog.SAVE, directory=os.path.expanduser("~/Documents"),
+            save_filename=os.path.basename(src), file_types=("MIDI files (*.mid)",))
+        if not result:
+            return {"cancelled": True}
+        dest = result if isinstance(result, str) else result[0]
+        if not dest.lower().endswith((".mid", ".midi")):
+            dest += ".mid"
+        shutil.copyfile(src, dest)
+        return {"path": dest}
+
     def choose_songs_folder(self):
         import webview
         import app as studio

@@ -33,6 +33,7 @@ except ImportError:
     raise SystemExit("The studio needs Flask:  pip install -r requirements.txt")
 
 import autochart as ac
+import midi_export
 import updates
 import librosa
 import soundfile as sf
@@ -154,7 +155,15 @@ def build_payload(job):
         peaks = np.abs(m[: n * hop]).reshape(n, hop).max(axis=1) / loudest
         notes = []
         if name in proj.parts:
-            notes = [[round(x.time, 4), round(x.pitch, 2), x.poly] for x in proj.parts[name][0]]
+            # [time on the beat grid, pitch, chord size, length, MIDI notes heard]
+            heard = sorted(proj.parts[name][0], key=lambda x: x.tick)
+            starts = [float(proj.tempo.tick_to_time(x.tick)) - proj.pad for x in heard]
+            for i, (x, t) in enumerate(zip(heard, starts)):
+                length = x.end_time - x.time
+                if i + 1 < len(heard):
+                    length = min(length, starts[i + 1] - t)     # one strum ends where the next begins
+                notes.append([round(t, 4), round(x.pitch, 2), x.poly,
+                              round(max(0.05, length), 3), midi_export.note_keys(x)])
         tracks.append(dict(
             id=name, name=TRACK_NAMES[name], chartable=name in proj.parts or (not proj.parts and name == "mix"),
             url=f"/api/jobs/{job.id}/audio/{name}.wav",
@@ -393,6 +402,31 @@ def job_build(job_id):
     return jsonify(download=f"/api/jobs/{job.id}/download", filename=f"{name}.zip",
                    files=sorted(os.listdir(folder)), counts=counts, installed=installed,
                    size=os.path.getsize(zip_path))
+
+
+def midi_name(job):
+    meta = job.meta or {}
+    base = safe_filename(f"{meta.get('artist', '')} - {meta.get('title', '')}".strip(" -"), "song")
+    return f"{base} (notes heard).mid"
+
+
+def write_midi(job):
+    """Save what each separated instrument played as MIDI; returns the path."""
+    path = os.path.join(job.dir, midi_name(job))
+    meta = job.meta or {}
+    with open(path, "wb") as fh:
+        fh.write(ac.transcription_midi(job.proj, f"{meta.get('artist', '')} - {meta.get('title', '')}"))
+    return path
+
+
+@app.get("/api/jobs/<job_id>/notes.mid")
+def job_midi(job_id):
+    job = get_job(job_id)
+    if job.proj is None or not job.proj.parts:
+        abort(404)
+    path = write_midi(job)
+    return send_file(path, as_attachment=True, download_name=os.path.basename(path),
+                     mimetype="audio/midi")
 
 
 @app.get("/api/jobs/<job_id>/download")
